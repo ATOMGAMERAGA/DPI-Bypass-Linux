@@ -1,0 +1,33 @@
+[Unit]
+Description=DPI Bypass — DPI engellerini aşan arka plan servisi
+Documentation=https://github.com/atomgameraga/DPI-Bypass-Linux
+After=network.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/dpi-bypassd
+ExecStopPost=/usr/bin/dpi-bypassd --cleanup
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+
+# Yapılandırma, durum, çalışma ve günlük dizinleri
+ConfigurationDirectory=dpi-bypass
+ConfigurationDirectoryMode=0755
+StateDirectory=dpi-bypass
+RuntimeDirectory=dpi-bypass
+RuntimeDirectoryMode=0755
+LogsDirectory=dpi-bypass
+
+# Yetkiler: yalnızca ağ kuralları ve soket seçenekleri için gerekenler
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_CHOWN CAP_DAC_OVERRIDE CAP_SETGID CAP_SETUID
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=no
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+// dpi-bypass grubundaki kullanıcılar servisi parola sormadan yönetebilir.
+polkit.addRule(function (action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        subject.isInGroup("dpi-bypass")) {
+        var unit = action.lookup("unit");
+        if (unit == "dpi-bypass.service") {
+            return polkit.Result.YES;
+        }
+    }
+});

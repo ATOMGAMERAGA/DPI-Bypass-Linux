@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=DPI Bypass
+Name[tr]=DPI Bypass
+GenericName=DPI engel aşma
+Comment=Discord ve diğer engelli sitelere DPI engelini aşarak erişin
+Comment[tr]=Discord ve diğer engelli sitelere DPI engelini aşarak erişin
+Exec=dpi-bypass-gui
+Icon=xyz.atomland.DpiBypass
+Terminal=false
+Categories=Network;Security;GTK;GNOME;
+Keywords=dpi;discord;engel;bypass;vpn;dns;sansür;
+StartupNotify=true
+StartupWMClass=xyz.atomland.DpiBypass
+X-GNOME-UsesNotifications=true

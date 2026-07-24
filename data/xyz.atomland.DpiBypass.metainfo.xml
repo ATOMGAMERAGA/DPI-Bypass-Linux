@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>xyz.atomland.DpiBypass</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>DPI Bypass</name>
+  <summary>DPI engellerini aşan ağ koruması</summary>
+  <summary xml:lang="en">Bypass DPI-based network blocking</summary>
+
+  <description>
+    <p>
+      DPI Bypass, derin paket incelemesi (DPI) ile uygulanan engelleri
+      kullanıcı alanında aşar. Discord başta olmak üzere engellenen sitelere
+      erişimi açar; şifreli DNS (Cloudflare, yedek olarak Google ve Quad9)
+      kullanır ve ağ değiştiğinde çalışan yöntemi kendiliğinden yeniden bulur.
+    </p>
+    <p>Öne çıkanlar:</p>
+    <ul>
+      <li>Operatörü (Türk Telekom, Turkcell, Vodafone, TurkNet…) otomatik saptar</li>
+      <li>Yöntemi discord.com üzerinde gerçekten sınayarak seçer</li>
+      <li>Yeni bir ağa geçildiğinde saniyeler içinde yeniden ayarlanır</li>
+      <li>VPN değildir: trafik dışarı çıkmaz, ping ve gecikme etkilenmez</li>
+      <li>Sistem açılışında başlayan bir systemd servisi olarak çalışır</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">xyz.atomland.DpiBypass.desktop</launchable>
+
+  <categories>
+    <category>Network</category>
+    <category>Security</category>
+  </categories>
+
+  <keywords>
+    <keyword>dpi</keyword>
+    <keyword>discord</keyword>
+    <keyword>dns</keyword>
+    <keyword>sansür</keyword>
+  </keywords>
+
+  <developer id="xyz.atomland">
+    <name>Atom Gamer Arda A.G.A</name>
+  </developer>
+  <update_contact>atomgameraga@atomland.xyz</update_contact>
+  <url type="homepage">https://github.com/atomgameraga/DPI-Bypass-Linux</url>
+  <url type="bugtracker">https://github.com/atomgameraga/DPI-Bypass-Linux/issues</url>
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+
+  <releases>
+    <release version="1.0.0" date="2026-07-24">
+      <description>
+        <p>İlk sürüm.</p>
+      </description>
+    </release>
+  </releases>
+
+  <content_rating type="oars-1.1"/>
+</component>

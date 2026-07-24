@@ -1,0 +1,38 @@
+/* DPI Bypass — GNOME arayüz stilleri */
+
+.dpi-status-icon {
+  margin-bottom: 6px;
+}
+
+.dpi-ok {
+  color: @success_color;
+}
+
+.dpi-fail {
+  color: @error_color;
+}
+
+.dpi-off {
+  color: alpha(currentColor, 0.55);
+}
+
+.dpi-busy {
+  color: @accent_color;
+}
+
+.dpi-banner {
+  padding: 10px 14px;
+  border-bottom: 1px solid alpha(currentColor, 0.12);
+}
+
+.dpi-banner-warning {
+  background-color: alpha(@warning_color, 0.18);
+}
+
+.dpi-banner-info {
+  background-color: alpha(@accent_color, 0.14);
+}
+
+row.property > box.header > box.title > .subtitle {
+  font-family: monospace;
+}
