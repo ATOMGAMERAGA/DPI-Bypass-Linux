@@ -1,0 +1,96 @@
+"""Sabitler: yollar, portlar, paket işaretleri."""
+
+from __future__ import annotations
+
+import os
+
+# --- yollar -----------------------------------------------------------------
+CONFIG_DIR = "/etc/dpi-bypass"
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+STATE_DIR = "/var/lib/dpi-bypass"
+STATE_FILE = os.path.join(STATE_DIR, "state.json")
+RUN_DIR = "/run/dpi-bypass"
+SOCKET_PATH = os.path.join(RUN_DIR, "daemon.sock")
+LOG_DIR = "/var/log/dpi-bypass"
+LOG_FILE = os.path.join(LOG_DIR, "service.log")
+
+SOCKET_GROUP = "dpi-bypass"
+
+# --- ağ ---------------------------------------------------------------------
+# Kendi trafiğimizi yönlendirme kurallarından muaf tutmak için kullanılan işaret.
+# 0x44 0x50 0x49 = "DPI"
+FWMARK = 0x445049
+
+PROXY_PORT = 20443   # şeffaf TCP vekil sunucusu
+DNS_PORT = 20453     # yerel DoH -> düz DNS köprüsü
+
+# Şeffaf yönlendirmenin uygulandığı TCP portları
+REDIRECT_PORTS = (80, 443)
+
+# --- DNS --------------------------------------------------------------------
+# Birincil: Cloudflare, yedekler: Google ve Quad9 (kullanıcı isteği).
+DOH_PROVIDERS = [
+    {
+        "name": "Cloudflare",
+        "host": "cloudflare-dns.com",
+        "path": "/dns-query",
+        "addrs": ["1.1.1.1", "1.0.0.1"],
+        "v6": ["2606:4700:4700::1111", "2606:4700:4700::1001"],
+    },
+    {
+        "name": "Google",
+        "host": "dns.google",
+        "path": "/dns-query",
+        "addrs": ["8.8.8.8", "8.8.4.4"],
+        "v6": ["2001:4860:4860::8888", "2001:4860:4860::8844"],
+    },
+    {
+        "name": "Quad9",
+        "host": "dns.quad9.net",
+        "path": "/dns-query",
+        "addrs": ["9.9.9.9", "149.112.112.112"],
+        "v6": ["2620:fe::fe", "2620:fe::9"],
+    },
+]
+
+# --- test hedefi ------------------------------------------------------------
+# Bir yöntem bulunduğunda gerçekten çalışıyor mu diye bakılan adres.
+TEST_TARGETS = [
+    ("discord.com", 443, "/"),
+    ("gateway.discord.gg", 443, "/"),
+    ("cdn.discordapp.com", 443, "/"),
+]
+
+# Yönlendirilecek (engelli kabul edilen) alan adları.
+DEFAULT_BLOCKED_DOMAINS = [
+    # Discord
+    "discord.com",
+    "discordapp.com",
+    "discordapp.net",
+    "discord.gg",
+    "discord.media",
+    "discord.dev",
+    "discordstatus.com",
+    "gateway.discord.gg",
+    "cdn.discordapp.com",
+    "media.discordapp.net",
+    "images-ext-1.discordapp.net",
+    "images-ext-2.discordapp.net",
+    "latency.discord.media",
+    "router.discordapp.net",
+    # Türkiye'de DPI ile sık engellenen diğer alan adları
+    "roblox.com",
+    "rbxcdn.com",
+    "instagram.com",
+    "cdninstagram.com",
+    "wattpad.com",
+    "onlyfans.com",
+    "rutracker.org",
+    "1337x.to",
+    "thepiratebay.org",
+    "nyaa.si",
+    "pornhub.com",
+    "xvideos.com",
+    "redtube.com",
+    "xhamster.com",
+]

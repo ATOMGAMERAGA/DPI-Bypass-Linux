@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=DPI Bypass
+Name[tr]=DPI Bypass
+Comment=Oturum açılışında DPI Bypass arayüzünü başlatır
+Comment[tr]=Oturum açılışında DPI Bypass arayüzünü başlatır
+Exec=dpi-bypass-gui
+Icon=xyz.atomland.DpiBypass
+Terminal=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=5
+Categories=Network;Security;
