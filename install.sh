@@ -11,7 +11,7 @@ set -euo pipefail
 
 APP_NAME="DPI Bypass"
 APP_ID="xyz.atomland.DpiBypass"
-VERSION="1.0.0"
+APP_VERSION="1.0.0"
 REPO="${DPI_BYPASS_REPO:-atomgameraga/DPI-Bypass-Linux}"
 BRANCH="${DPI_BYPASS_BRANCH:-main}"
 
@@ -38,7 +38,7 @@ die()   { printf '%s✖%s %s\n' "$C_ERR" "$C_R" "$*" >&2; exit 1; }
 
 banner() {
     printf '\n%s╭──────────────────────────────────────────────╮%s\n' "$C_B" "$C_R"
-    printf '%s│%s  %s %s — Linux kurulumu%s\n' "$C_B" "$C_R" "$APP_NAME" "$VERSION" ""
+    printf '%s│%s  %s %s — Linux kurulumu%s\n' "$C_B" "$C_R" "$APP_NAME" "$APP_VERSION" ""
     printf '%s│%s  %sYazan: Atom Gamer Arda A.G.A%s\n' "$C_B" "$C_R" "$C_D" "$C_R"
     printf '%s╰──────────────────────────────────────────────╯%s\n\n' "$C_B" "$C_R"
 }
@@ -57,13 +57,20 @@ require_root() {
 # ------------------------------------------------------------- dağıtım -----
 DISTRO_ID=""; DISTRO_NAME=""; DISTRO_LIKE=""; PKG=""
 
+os_release_field() {
+    # os-release'i alt kabukta okur; NAME/VERSION gibi değişkenler betiğin
+    # kendi değişkenlerini ezmesin diye asla doğrudan source edilmez.
+    # shellcheck disable=SC1091
+    ( . /etc/os-release 2>/dev/null; eval "printf '%s' \"\${$1:-}\"" )
+}
+
 detect_distro() {
     if [ -r /etc/os-release ]; then
-        # shellcheck disable=SC1091
-        . /etc/os-release
-        DISTRO_ID="${ID:-}"
-        DISTRO_NAME="${PRETTY_NAME:-${NAME:-bilinmeyen}}"
-        DISTRO_LIKE="${ID_LIKE:-}"
+        DISTRO_ID="$(os_release_field ID)"
+        DISTRO_NAME="$(os_release_field PRETTY_NAME)"
+        [ -n "$DISTRO_NAME" ] || DISTRO_NAME="$(os_release_field NAME)"
+        [ -n "$DISTRO_NAME" ] || DISTRO_NAME="bilinmeyen"
+        DISTRO_LIKE="$(os_release_field ID_LIKE)"
     else
         DISTRO_NAME="bilinmeyen"
     fi
@@ -193,10 +200,19 @@ obtain_sources() {
     else
         die "curl, wget ya da git gerekli."
     fi
-    SRC_DIR="$(find "$TMP_DIR" -maxdepth 2 -type d -name dpibypass \
-        -path '*/src/*' -printf '%h\n' | head -1)"
-    SRC_DIR="${SRC_DIR%/src}"
-    [ -d "$SRC_DIR/src/dpibypass" ] || die "Kaynak ağacı bulunamadı."
+    # Arşiv "DPI-Bypass-Linux-main/" gibi tek bir üst dizine açılır; paket
+    # dizini bu yüzden üç düzey aşağıdadır. -printf yerine dirname kullanılır,
+    # böylece busybox find (Alpine) ile de çalışır.
+    local found=""
+    found="$(find "$TMP_DIR" -maxdepth 4 -type d -path '*/src/dpibypass' \
+        2>/dev/null | head -1)"
+    if [ -z "$found" ]; then
+        found="$(find "$TMP_DIR" -type d -path '*/src/dpibypass' 2>/dev/null | head -1)"
+    fi
+    [ -n "$found" ] || die "Kaynak ağacı bulunamadı (arşiv beklenen yapıda değil)."
+    SRC_DIR="$(dirname "$(dirname "$found")")"
+    [ -d "$SRC_DIR/src/dpibypass" ] && [ -d "$SRC_DIR/data" ] && [ -d "$SRC_DIR/bin" ] \
+        || die "Kaynak ağacı eksik: $SRC_DIR"
     ok "Kaynaklar hazır."
 }
 
@@ -267,9 +283,23 @@ setup_group() {
     if ! getent group "$GROUP" >/dev/null 2>&1; then
         groupadd --system "$GROUP" >/dev/null 2>&1 || true
     fi
-    local target_user="${SUDO_USER:-${PKEXEC_UID:-}}"
+    local target_user="${SUDO_USER:-}"
+    if [ -z "$target_user" ] && [ -n "${PKEXEC_UID:-}" ]; then
+        # PKEXEC_UID sayısaldır; kullanıcı adına çevir
+        target_user="$(id -nu "$PKEXEC_UID" 2>/dev/null || true)"
+    fi
     if [ -z "$target_user" ] || [ "$target_user" = "root" ]; then
         target_user="$(logname 2>/dev/null || true)"
+    fi
+    if [ -z "$target_user" ] || [ "$target_user" = "root" ]; then
+        # Açık oturumlardaki ilk normal kullanıcı
+        target_user="$(who 2>/dev/null | awk '$1 != "root" {print $1; exit}')"
+    fi
+    if [ -z "$target_user" ] || [ "$target_user" = "root" ]; then
+        # Tek bir normal kullanıcı varsa onu seç (UID 1000-60000)
+        target_user="$(awk -F: '$3 >= 1000 && $3 < 60000 && $7 !~ /(nologin|false)$/ \
+            {print $1}' /etc/passwd 2>/dev/null | head -2 | \
+            { mapfile -t users; [ "${#users[@]}" -eq 1 ] && printf '%s' "${users[0]}"; })"
     fi
     if [ -n "$target_user" ] && [ "$target_user" != "root" ] \
        && id "$target_user" >/dev/null 2>&1; then
@@ -289,10 +319,11 @@ enable_service() {
         warn "systemd bulunamadı; servis elle başlatılmalı: dpi-bypassd"
         return
     fi
-    systemctl daemon-reload
+    systemctl daemon-reload >/dev/null 2>&1 || \
+        warn "systemd birimleri yeniden yüklenemedi."
     systemctl enable "$SERVICE" >/dev/null 2>&1 || \
         warn "Servis açılışa eklenemedi."
-    systemctl restart "$SERVICE" || warn "Servis başlatılamadı."
+    systemctl restart "$SERVICE" >/dev/null 2>&1 || warn "Servis başlatılamadı."
     sleep 2
     if systemctl is-active --quiet "$SERVICE"; then
         ok "Servis çalışıyor ve sistem açılışında otomatik başlayacak."
@@ -322,7 +353,7 @@ from gi.repository import Gtk, Adw
 
 final_message() {
     printf '\n%s╭──────────────────────────────────────────────╮%s\n' "$C_OK" "$C_R"
-    printf '%s│%s  %sKURULDU:%s %s %s\n' "$C_OK" "$C_R" "$C_B" "$C_R" "$APP_NAME" "$VERSION"
+    printf '%s│%s  %sKURULDU:%s %s %s\n' "$C_OK" "$C_R" "$C_B" "$C_R" "$APP_NAME" "$APP_VERSION"
     printf '%s╰──────────────────────────────────────────────╯%s\n\n' "$C_OK" "$C_R"
 
     printf '  %sUygulama adı :%s %s\n' "$C_D" "$C_R" "$APP_NAME"
