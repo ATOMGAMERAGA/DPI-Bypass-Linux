@@ -1,6 +1,6 @@
 """Sürüm bilgisi."""
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 APP_NAME = "DPI Bypass"
 APP_ID = "xyz.atomland.DpiBypass"

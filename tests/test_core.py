@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import socket
 import ssl
 import struct
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
@@ -347,6 +349,312 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(order[0].name, "oob-snimid")
         self.assertNotIn("none", [s.name for s in order])
         self.assertEqual(len(order), len(strategies.CATALOG) - 1)
+
+
+# --------------------------------------------------------------------------- #
+# Vodafone sınırsız kipi
+# --------------------------------------------------------------------------- #
+
+def test_ttl_guard_desync_stratejilerinin_uzerinde():
+    """Vodafone TTL koruması, hiçbir desync stratejisini kapsamamalı."""
+    from dpibypass import strategies
+    from dpibypass.constants import VODAFONE_TTL_GUARD, VODAFONE_TTL_VALUE
+    en_yuksek = max(s.ttl for s in strategies.CATALOG)
+    assert en_yuksek < VODAFONE_TTL_GUARD, (
+        f"Bir strateji TTL={en_yuksek} kullanıyor; koruma eşiği "
+        f"{VODAFONE_TTL_GUARD}. Eşiği yükselt, yoksa Vodafone modu "
+        f"atlatmayı bozar."
+    )
+    assert VODAFONE_TTL_GUARD < VODAFONE_TTL_VALUE
+
+
+class TestVodafoneGuard(unittest.TestCase):
+    """Koruma eşiği testi; unittest ile de çalışsın diye sarmalanmıştır."""
+
+    def test_ttl_guard_above_every_desync_strategy(self):
+        test_ttl_guard_desync_stratejilerinin_uzerinde()
+
+    def test_guard_below_normal_system_ttl(self):
+        from dpibypass.constants import VODAFONE_TTL_GUARD
+        # Normal işletim sistemi TTL'i 64'tür; eşik bunun altında kalmalı ki
+        # sıradan paketler yeniden yazılabilsin.
+        self.assertLess(VODAFONE_TTL_GUARD, 64)
+
+
+class TestVodafoneConfig(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dpibypass-test-")
+        self.config = Config(path=os.path.join(self.tmp, "config.json"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_defaults_present_with_types(self):
+        from dpibypass.config import DEFAULTS
+        self.assertIs(DEFAULTS["vodafone_mode"], False)
+        self.assertEqual(DEFAULTS["vodafone_networks"], [])
+        self.assertIsInstance(DEFAULTS["vodafone_ttl"], int)
+        self.assertIs(DEFAULTS["vodafone_disable_ipv6"], True)
+
+    def test_defaults_ttl_matches_constant(self):
+        from dpibypass.config import DEFAULTS
+        from dpibypass.constants import VODAFONE_TTL_VALUE
+        self.assertEqual(DEFAULTS["vodafone_ttl"], VODAFONE_TTL_VALUE)
+
+    def test_add_has_remove_network(self):
+        self.assertFalse(self.config.vodafone_has_network("abc"))
+        self.config.vodafone_add_network("abc", "Telefonum", "wlan0")
+        self.assertTrue(self.config.vodafone_has_network("abc"))
+        entry = self.config.vodafone_networks()[0]
+        self.assertEqual(entry["name"], "Telefonum")
+        self.assertEqual(entry["interface"], "wlan0")
+
+        self.config.vodafone_remove_network("abc")
+        self.assertFalse(self.config.vodafone_has_network("abc"))
+
+    def test_empty_key_ignored(self):
+        self.config.vodafone_add_network("", "Adsız", "wlan0")
+        self.assertEqual(self.config.vodafone_networks(), [])
+        self.assertFalse(self.config.vodafone_has_network(""))
+
+    def test_same_network_not_duplicated(self):
+        self.config.vodafone_add_network("abc", "Telefonum", "wlan0")
+        self.config.vodafone_add_network("abc", "Telefonum", "wlp2s0")
+        nets = self.config.vodafone_networks()
+        self.assertEqual(len(nets), 1)
+        self.assertEqual(nets[0]["interface"], "wlp2s0")
+
+    def test_at_most_ten_networks_oldest_dropped(self):
+        from dpibypass.constants import VODAFONE_MAX_NETWORKS
+        for index in range(VODAFONE_MAX_NETWORKS + 2):
+            self.config.vodafone_add_network(f"key{index}", f"Ağ {index}",
+                                             "wlan0")
+        nets = self.config.vodafone_networks()
+        self.assertEqual(len(nets), VODAFONE_MAX_NETWORKS)
+        self.assertFalse(self.config.vodafone_has_network("key0"))
+        self.assertFalse(self.config.vodafone_has_network("key1"))
+        self.assertTrue(self.config.vodafone_has_network(
+            f"key{VODAFONE_MAX_NETWORKS + 1}"))
+
+    def test_survives_reload_from_disk(self):
+        self.config.vodafone_add_network("abc", "Telefonum", "wlan0")
+        self.config.update({"vodafone_mode": True})
+        again = Config(path=self.config.path)
+        self.assertTrue(again["vodafone_mode"])
+        self.assertTrue(again.vodafone_has_network("abc"))
+
+    def test_broken_entries_ignored(self):
+        self.config.data["vodafone_networks"] = [
+            {"key": "iyi", "name": "Ağ", "interface": "wlan0"},
+            {"name": "anahtarsız"}, "metin", None, 42,
+        ]
+        nets = self.config.vodafone_networks()
+        self.assertEqual(len(nets), 1)
+        self.assertEqual(nets[0]["key"], "iyi")
+
+
+class TestVodafoneRules(unittest.TestCase):
+    """Kural metni üretimi — gerçek nft çalıştırmadan doğrulanır."""
+
+    def setUp(self):
+        from dpibypass.vodafone import VodafoneMode
+        self.mode = VodafoneMode()
+        self.script = self.mode._build_nft_script("test0")
+
+    def test_script_contains_required_parts(self):
+        for needle in ('oifname "test0"',
+                       "ip ttl >= 32",
+                       "ip ttl set 65",
+                       "ip6 hoplimit >= 32",
+                       "ip6 hoplimit set 65",
+                       "counter",
+                       "table inet dpibypass_ttl"):
+            self.assertIn(needle, self.script, f"kural metninde yok: {needle}")
+
+    def test_counter_comes_before_set(self):
+        for line in self.script.splitlines():
+            if "counter" in line:
+                self.assertLess(line.index("counter"), line.index(" set "),
+                                "counter, set işleminden önce gelmeli")
+
+    def test_idempotent_table_pattern(self):
+        # "table … / delete table … / table … {" kalıbı: tablo olsa da
+        # olmasa da çalışır.
+        head = self.script.splitlines()[:3]
+        self.assertEqual(head[0], "table inet dpibypass_ttl")
+        self.assertEqual(head[1], "delete table inet dpibypass_ttl")
+        self.assertTrue(head[2].startswith("table inet dpibypass_ttl {"))
+
+    def test_postrouting_priority_after_srcnat(self):
+        self.assertIn("hook postrouting priority 300", self.script)
+
+    def test_no_unconditional_ttl_set(self):
+        """Eşiksiz bir 'ip ttl set' kuralı atlatmayı bozardı."""
+        for line in self.script.splitlines():
+            if "ttl set" in line or "hoplimit set" in line:
+                self.assertIn(">=", line,
+                              "TTL yeniden yazımı eşiksiz yazılmış")
+
+    def test_guard_and_value_come_from_constants(self):
+        from dpibypass.constants import (VODAFONE_TTL_GUARD,
+                                         VODAFONE_TTL_VALUE)
+        self.assertEqual(self.mode.guard, VODAFONE_TTL_GUARD)
+        self.assertEqual(self.mode.ttl, VODAFONE_TTL_VALUE)
+
+    def test_invalid_interface_names_rejected(self):
+        from dpibypass.vodafone import VodafoneError
+        for bad in ("eth0; rm -rf /", "a" * 20, "", "wlan0\nfoo", "wlan0\n",
+                    "wlan 0", "wlan0'", 'wlan0"', "../etc", None, 5):
+            with self.subTest(iface=bad):
+                with self.assertRaises(VodafoneError):
+                    self.mode._build_nft_script(bad)
+
+    def test_valid_interface_names_accepted(self):
+        for good in ("wlan0", "wlp2s0", "enp0s31f6", "usb0", "eth0.100",
+                     "br-lan", "a" * 15):
+            with self.subTest(iface=good):
+                self.assertIn(f'oifname "{good}"',
+                              self.mode._build_nft_script(good))
+
+    def test_ttl_must_stay_above_guard(self):
+        from dpibypass.vodafone import VodafoneError, VodafoneMode
+        for bad in (0, 8, 32, 256, -1, "abc"):
+            with self.subTest(ttl=bad):
+                with self.assertRaises(VodafoneError):
+                    VodafoneMode(ttl=bad)
+        self.assertEqual(VodafoneMode(ttl=65).ttl, 65)
+        self.assertEqual(VodafoneMode(ttl=129).ttl, 129)
+
+
+class TestVodafoneTeardown(unittest.TestCase):
+    """Kaldırma yollarının gerilemesini önleyen testler."""
+
+    @staticmethod
+    def _fake_run(calls, fail_when=None):
+        """util.run yerine geçen, komutları kaydeden sahte çalıştırıcı."""
+        import subprocess as sp
+
+        def runner(cmd, **_kwargs):
+            cmd = list(cmd)
+            calls.append(cmd)
+            code = 0
+            if "-C" in cmd:
+                code = 1          # bağlantı kuralı henüz yok
+            if fail_when and fail_when(cmd):
+                code = 3
+            return sp.CompletedProcess(cmd, code, "", "sahte hata")
+        return runner
+
+    def test_ipv6_failure_keeps_ipv4_rule(self):
+        """ip6tables başarısız olursa IPv4 zinciri silinmemeli."""
+        from unittest import mock
+        from dpibypass import vodafone as vmod
+
+        calls: list[list[str]] = []
+        failing = lambda cmd: cmd[0] == "ip6tables" and "-A" in cmd
+        with mock.patch.object(vmod, "run", self._fake_run(calls, failing)), \
+                mock.patch.object(vmod, "which", lambda name: "/sbin/" + name):
+            mode = vmod.VodafoneMode()
+            mode._backend, mode._backend_probed = "iptables", True
+            mode.apply("wlan0", disable_ipv6=False)
+
+        # IPv4 kuralının kurulduğu an
+        installed = max(i for i, c in enumerate(calls)
+                        if c[0] == "iptables" and "-A" in c
+                        and "DPIBYPASS_TTL" in c)
+        wiped = [c for c in calls[installed:]
+                 if c[0] == "iptables" and ("-X" in c or "-F" in c)]
+        self.assertEqual(wiped, [],
+                         "IPv6 hatası IPv4 zincirini de silmiş: %r" % (wiped,))
+        self.assertTrue(mode.active)
+
+    def test_clear_failure_does_not_report_disabled(self):
+        """nft kaldırması başarısızsa mod 'kapalı' gösterilmemeli."""
+        import subprocess as sp
+        from unittest import mock
+        from dpibypass import vodafone as vmod
+
+        mode = vmod.VodafoneMode()
+        mode._backend, mode._backend_probed = "nft", True
+        mode.active, mode.interface = True, "wlan0"
+
+        def failing(cmd, **_kwargs):
+            return sp.CompletedProcess(list(cmd), 1, "", "nft hatası")
+
+        with mock.patch.object(vmod, "run", failing):
+            self.assertFalse(mode.clear())
+        self.assertTrue(mode.active,
+                        "kural kalkmadığı hâlde mod kapalı gösteriliyor")
+
+    def test_clear_success_reports_disabled(self):
+        import subprocess as sp
+        from unittest import mock
+        from dpibypass import vodafone as vmod
+
+        mode = vmod.VodafoneMode()
+        mode._backend, mode._backend_probed = "nft", True
+        mode.active, mode.interface = True, "wlan0"
+
+        with mock.patch.object(
+                vmod, "run",
+                lambda cmd, **k: sp.CompletedProcess(list(cmd), 0, "", "")):
+            self.assertTrue(mode.clear())
+        self.assertFalse(mode.active)
+        self.assertEqual(mode.interface, "")
+
+
+class TestVodafoneDaemonTtl(unittest.IsolatedAsyncioTestCase):
+    """'enabled' dalı return ile çıktığı için TTL eşitlemesi atlanmamalı."""
+
+    async def test_ttl_synced_when_enabled_changes_together(self):
+        import subprocess as sp
+        from unittest import mock
+        from dpibypass import daemon as dmod, vodafone as vmod
+
+        tmp = tempfile.mkdtemp(prefix="dpibypass-daemon-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+
+        ok = lambda cmd, **k: sp.CompletedProcess(list(cmd), 0, "", "")
+        with mock.patch.object(vmod, "run", ok), \
+                mock.patch.object(vmod, "which", lambda name: None):
+            daemon = dmod.Daemon.__new__(dmod.Daemon)
+            daemon.config = Config(path=os.path.join(tmp, "config.json"))
+            daemon.config.update({"enabled": True, "vodafone_ttl": 65})
+            daemon.vodafone = vmod.VodafoneMode()
+            daemon.firewall = mock.Mock()
+            daemon.proxy = mock.Mock(stop=mock.AsyncMock())
+            daemon.dns_server = mock.Mock(stop=mock.AsyncMock())
+            daemon.active_strategy = None
+
+            # İki ayar tek istekte değişiyor (cli.py 'set' bunu böyle yollar)
+            daemon.config.update({"enabled": False, "vodafone_ttl": 100})
+            await daemon._apply_config_change(["enabled", "vodafone_ttl"])
+
+        self.assertEqual(daemon.vodafone.ttl, 100,
+                         "'enabled' ile birlikte değişince TTL eşitlenmedi")
+
+    async def test_invalid_ttl_is_reverted_in_config(self):
+        import subprocess as sp
+        from unittest import mock
+        from dpibypass import daemon as dmod, vodafone as vmod
+
+        tmp = tempfile.mkdtemp(prefix="dpibypass-daemon-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+
+        ok = lambda cmd, **k: sp.CompletedProcess(list(cmd), 0, "", "")
+        with mock.patch.object(vmod, "run", ok), \
+                mock.patch.object(vmod, "which", lambda name: None):
+            daemon = dmod.Daemon.__new__(dmod.Daemon)
+            daemon.config = Config(path=os.path.join(tmp, "config.json"))
+            daemon.vodafone = vmod.VodafoneMode()
+            daemon.network = None
+
+            daemon.config.update({"vodafone_ttl": 8})   # koruma eşiğinin altı
+            await daemon._apply_config_change(["vodafone_ttl"])
+
+        self.assertEqual(daemon.vodafone.ttl, 65)
+        self.assertEqual(daemon.config["vodafone_ttl"], 65,
+                         "geçersiz TTL yapılandırmada bırakılmış")
 
 
 if __name__ == "__main__":

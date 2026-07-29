@@ -16,6 +16,27 @@ LOG_FILE = os.path.join(LOG_DIR, "service.log")
 
 SOCKET_GROUP = "dpi-bypass"
 
+# --- Vodafone sınırsız kipi -------------------------------------------------
+# Vodafone modunda TTL yeniden yazımı yalnızca bu değerin ÜSTÜNDEKİ paketlere
+# uygulanır. strategies.py'deki disorder/fake stratejileri kasıtlı olarak
+# düşük TTL kullanır (2-8); onlara dokunulursa atlatma çalışmaz.
+VODAFONE_TTL_GUARD = 32
+VODAFONE_TTL_VALUE = 65
+
+VODAFONE_TABLE = "dpibypass_ttl"
+VODAFONE_CHAIN = "DPIBYPASS_TTL"   # iptables zincir adı
+
+# Modun etkin olacağı ağların üst sınırı; en eskisi düşürülür.
+VODAFONE_MAX_NETWORKS = 10
+
+# Arayüzün eski IPv6 ayarı burada tutulur: servis beklenmedik biçimde
+# sonlanırsa --cleanup dalı değeri buradan okuyup geri yazabilir.
+VODAFONE_STATE_FILE = os.path.join(RUN_DIR, "vodafone.json")
+
+# pkexec ile çağrılan yetkilendirme yardımcısı (install.sh buraya kurar).
+VODAFONE_HELPER = "/usr/libexec/dpi-bypass/vodafone-helper"
+VODAFONE_ACTION = "xyz.atomland.DpiBypass.vodafone-mode"
+
 # --- ağ ---------------------------------------------------------------------
 # Kendi trafiğimizi yönlendirme kurallarından muaf tutmak için kullanılan işaret.
 # 0x44 0x50 0x49 = "DPI"

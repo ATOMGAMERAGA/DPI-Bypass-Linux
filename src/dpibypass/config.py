@@ -9,7 +9,8 @@ import time
 from typing import Any
 
 from .constants import (CONFIG_DIR, CONFIG_FILE, DEFAULT_BLOCKED_DOMAINS,
-                        STATE_DIR, STATE_FILE)
+                        STATE_DIR, STATE_FILE, VODAFONE_MAX_NETWORKS,
+                        VODAFONE_TTL_VALUE)
 
 log = logging.getLogger("dpibypass.config")
 
@@ -28,6 +29,11 @@ DEFAULTS: dict[str, Any] = {
     "disabled_domains": [],
     "gui_autostart": True,
     "verbose": False,
+    # --- Vodafone sınırsız kipi ---------------------------------------------
+    "vodafone_mode": False,             # ana anahtar
+    "vodafone_networks": [],            # [{"key","name","interface"}, ...]
+    "vodafone_ttl": VODAFONE_TTL_VALUE, # ileri düzey; normalde değiştirilmez
+    "vodafone_disable_ipv6": True,      # tethering arayüzünde IPv6'yı kapat
 }
 
 
@@ -52,7 +58,7 @@ class Config:
 
     def save(self) -> bool:
         try:
-            os.makedirs(CONFIG_DIR, exist_ok=True)
+            os.makedirs(os.path.dirname(self.path) or CONFIG_DIR, exist_ok=True)
             tmp = self.path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(self.data, fh, indent=2, ensure_ascii=False)
@@ -94,6 +100,38 @@ class Config:
             seen.add(key)
             out.append(key)
         return out
+
+    # -- Vodafone kipinin etkin olduğu ağlar --------------------------------
+    # Mod yalnızca kullanıcının açtığı ağlarda çalışır: ev Wi-Fi'ına geçilince
+    # kendiliğinden devre dışı kalır, telefona dönülünce geri gelir.
+    def vodafone_networks(self) -> list[dict]:
+        """Kayıtlı ağların kopyası (bozuk girdiler elenir)."""
+        out: list[dict] = []
+        for item in self.get("vodafone_networks", []) or []:
+            if isinstance(item, dict) and item.get("key"):
+                out.append(dict(item))
+        return out
+
+    def vodafone_has_network(self, key: str) -> bool:
+        if not key:
+            return False
+        return any(net.get("key") == key for net in self.vodafone_networks())
+
+    def vodafone_add_network(self, key: str, name: str, iface: str) -> None:
+        """Ağı kaydet. Zaten varsa bilgileri tazelenir, sona alınır."""
+        if not key:
+            return
+        nets = [net for net in self.vodafone_networks() if net.get("key") != key]
+        nets.append({"key": key, "name": name, "interface": iface,
+                     "added": time.time()})
+        del nets[:-VODAFONE_MAX_NETWORKS]     # en eskiyi düş
+        self.update({"vodafone_networks": nets})
+
+    def vodafone_remove_network(self, key: str) -> None:
+        current = self.vodafone_networks()
+        nets = [net for net in current if net.get("key") != key]
+        if len(nets) != len(current):
+            self.update({"vodafone_networks": nets})
 
 
 class State:

@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""pkexec ile root olarak çalışır; Vodafone modunu açar/kapatır.
+
+Yalnızca yetkilendirme kapısı olarak var. Asıl işi servis yapar; bu betik
+sadece kimlik doğrulaması geçildikten sonra denetim soketine komut yollar.
+Hiçbir argüman kabuğa ya da alt sürece geçirilmez.
+"""
+
+import os
+import sys
+
+ACTIONS = ("enable", "disable")
+
+
+def _add_package_path() -> None:
+    here = os.path.dirname(os.path.realpath(__file__))
+    candidates = (
+        os.path.join(os.path.dirname(here), "src"),   # kaynak ağacı
+        "/usr/lib/dpi-bypass",                        # kurulu konum
+        "/usr/local/lib/dpi-bypass",
+    )
+    for path in candidates:
+        if os.path.isdir(os.path.join(path, "dpibypass")):
+            sys.path.insert(0, path)
+            return
+
+
+_add_package_path()
+
+from dpibypass.ipc import IpcClient  # noqa: E402
+
+
+def main() -> int:
+    if len(sys.argv) != 2 or sys.argv[1] not in ACTIONS:
+        print("kullanım: vodafone-helper enable|disable", file=sys.stderr)
+        return 2
+    reply = IpcClient().call(f"vodafone.{sys.argv[1]}")
+    if not reply.get("ok"):
+        print(reply.get("error", "bilinmeyen hata"), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

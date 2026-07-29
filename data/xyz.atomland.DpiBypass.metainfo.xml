@@ -56,6 +56,17 @@
   </requires>
 
   <releases>
+    <release version="1.1.0" date="2026-07-29">
+      <description>
+        <p>Vodafone sınırsız modu eklendi.</p>
+        <ul>
+          <li>Ayarlar → Gelişmiş altında yeni anahtar; açarken yönetici parolası sorulur.</li>
+          <li>Mod yalnızca kaydedildiği ağda etkin olur, diğer ağlarda kendiliğinden kapanır.</li>
+          <li>DPI atlatma stratejilerinin düşük TTL'li paketleri korunur.</li>
+          <li>Tethering arayüzünde IPv6 isteğe bağlı olarak kapatılır.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-07-24">
       <description>
         <p>İlk sürüm.</p>
