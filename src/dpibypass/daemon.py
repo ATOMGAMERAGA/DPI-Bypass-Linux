@@ -22,7 +22,7 @@ from typing import Optional
 
 from . import isps, logging_setup, strategies
 from .config import Config, State
-from .constants import DNS_PORT, PROXY_PORT
+from .constants import DNS_PORT, PROXY_PORT, VODAFONE_TTL_VALUE
 from .desync import capabilities
 from .dnsserver import DnsServer
 from .firewall import Firewall, FirewallError
@@ -34,6 +34,7 @@ from .strategies import Strategy
 from .tester import Tester
 from .util import domain_matches, is_root
 from .version import APP_NAME, __version__
+from .vodafone import VodafoneError, VodafoneMode
 
 log = logging.getLogger("dpibypass.daemon")
 
@@ -54,6 +55,7 @@ class Daemon:
         self.resolver = dns_resolver
         self.tester = Tester(self.resolver)
         self.firewall = Firewall(PROXY_PORT, DNS_PORT)
+        self.vodafone = self._make_vodafone()
         self.proxy = TransparentProxy(
             PROXY_PORT, self._current_strategy, self._should_bypass, self._on_result
         )
@@ -118,6 +120,7 @@ class Daemon:
             await self._start_network_services()
             await self.netmon.start()
             self.network = self.netmon.current
+            self._apply_vodafone()
             self._tasks.append(asyncio.ensure_future(self._periodic_recheck()))
             self.trigger_search("servis başlangıcı")
             await stop_event.wait()
@@ -147,6 +150,43 @@ class Daemon:
             self.status = STATE_FAILED
             self.status_detail = f"güvenlik duvarı hatası: {exc}"
 
+    # ------------------------------------------------------------------ #
+    # Vodafone sınırsız kipi
+    # ------------------------------------------------------------------ #
+    def _make_vodafone(self) -> VodafoneMode:
+        """Yapılandırmadaki TTL geçersizse varsayılana dönerek örnekle."""
+        try:
+            return VodafoneMode(ttl=int(self.config["vodafone_ttl"]))
+        except (VodafoneError, TypeError, ValueError) as exc:
+            log.error("vodafone_ttl ayarı geçersiz (%s); %d kullanılacak",
+                      exc, VODAFONE_TTL_VALUE)
+            self.config.update({"vodafone_ttl": VODAFONE_TTL_VALUE})
+            return VodafoneMode()
+
+    def _apply_vodafone(self) -> None:
+        """Vodafone modunu mevcut ağa göre uygula ya da kaldır."""
+        if not self.config["enabled"] or not self.config["vodafone_mode"]:
+            self.vodafone.clear()
+            return
+
+        net = self.network            # NetworkFingerprint
+        if not net.is_online():
+            self.vodafone.clear()
+            return
+        if not self.config.vodafone_has_network(net.key):
+            log.info("Vodafone modu bu ağda kayıtlı değil (%s), uygulanmadı",
+                     net.name)
+            self.vodafone.clear()
+            return
+        try:
+            self.vodafone.apply(
+                net.interface,
+                disable_ipv6=bool(self.config["vodafone_disable_ipv6"]))
+            log.info("Vodafone modu etkin: %s (%s), TTL=%d",
+                     net.name, net.interface, self.vodafone.ttl)
+        except VodafoneError as exc:
+            log.error("Vodafone modu uygulanamadı: %s", exc)
+
     async def shutdown(self) -> None:
         if self._stopping:
             return
@@ -160,6 +200,7 @@ class Daemon:
         await self.proxy.stop()
         await self.dns_server.stop()
         self.firewall.clear()
+        self.vodafone.clear()
         await self.ipc.stop()
 
     # ------------------------------------------------------------------ #
@@ -381,6 +422,9 @@ class Daemon:
         self.network = fp
         self.resolver.clear_cache()
         self.tester._ip_cache.clear()
+        # TTL düzeltmesi ağa bağlıdır: yeni ağ kayıtlı değilse kendiliğinden
+        # kalkar, kayıtlıysa yeni arayüz için yeniden kurulur.
+        self._apply_vodafone()
         if not fp.is_online():
             self.status_detail = "ağ bağlantısı yok"
             log.info("Ağ bağlantısı kesildi; arama beklemede")
@@ -432,6 +476,7 @@ class Daemon:
             "link": self.link.to_dict(),
             "network": self.network.to_dict(),
             "firewall": self.firewall.status(),
+            "vodafone": self._vodafone_status(),
             "proxy": dict(self.proxy.stats),
             "dns": {
                 **self.dns_server.stats,
@@ -444,6 +489,16 @@ class Daemon:
             "uptime": int(time.time() - self.started_at),
             "domains": len(self.bypass_domains()),
             "learned_domains": self.state.learned_domains(),
+        }
+
+    def _vodafone_status(self) -> dict:
+        """Kural durumuna kullanıcının seçimini ve ağ kaydını da ekler."""
+        return {
+            **self.vodafone.status(),
+            "mode": bool(self.config["vodafone_mode"]),
+            "registered": self.config.vodafone_has_network(self.network.key),
+            "network": self.network.name,
+            "networks": self.config.vodafone_networks(),
         }
 
     async def _on_command(self, request: dict) -> dict:
@@ -514,6 +569,38 @@ class Daemon:
                 await self._apply_config_change(["enabled"])
                 return {"ok": True, "data": "kapatıldı"}
 
+            if cmd == "vodafone.enable":
+                # O anki ağı kaydeder ve modu açar.
+                self.network = fingerprint()
+                net = self.network
+                if not net.is_online():
+                    return {"ok": False,
+                            "error": "Şu anda bir ağa bağlı değilsiniz."}
+                self.config.vodafone_add_network(net.key, net.name,
+                                                 net.interface)
+                self.config.update({"vodafone_mode": True})
+                self._apply_vodafone()
+                return {"ok": True, "data": {"network": net.to_dict(),
+                                             "vodafone": self._vodafone_status()}}
+
+            if cmd == "vodafone.disable":
+                self.config.update({"vodafone_mode": False})
+                if not self.vodafone.clear():
+                    return {"ok": False,
+                            "error": "TTL kuralları kaldırılamadı; kural "
+                                     "çekirdekte hâlâ etkin olabilir."}
+                return {"ok": True, "data": {"vodafone": self._vodafone_status()}}
+
+            if cmd == "vodafone.forget":
+                key = request.get("key") or self.network.key
+                self.config.vodafone_remove_network(key)
+                self._apply_vodafone()
+                return {"ok": True, "data": {"vodafone": self._vodafone_status()}}
+
+            if cmd == "vodafone.verify":
+                # Kuralın gerçekten paket saydığını döndürür.
+                return {"ok": True, "data": self._vodafone_status()}
+
             return {"ok": False, "error": f"bilinmeyen komut: {cmd}"}
         except Exception as exc:
             log.exception("komut hatası: %s", cmd)
@@ -524,12 +611,25 @@ class Daemon:
             return
         log.info("Ayar değişti: %s", ", ".join(changed))
 
+        # TTL eşitlemesi "enabled" dalından önce yapılır: o dal return ile
+        # çıkar ve iki ayar birlikte değiştiğinde eşitleme atlanırdı.
+        if "vodafone_ttl" in changed:
+            try:
+                self.vodafone.ttl = int(self.config["vodafone_ttl"])
+            except (VodafoneError, TypeError, ValueError) as exc:
+                log.error("vodafone_ttl ayarı geçersiz (%s); önceki değer "
+                          "(%d) geri yazıldı", exc, self.vodafone.ttl)
+                # Yapılandırma dosyası da gerçeği göstersin.
+                self.config.update({"vodafone_ttl": self.vodafone.ttl})
+
         if "enabled" in changed:
             if self.config["enabled"]:
                 await self._start_network_services()
+                self._apply_vodafone()
                 self.trigger_search("servis açıldı")
             else:
                 self.firewall.clear()
+                self.vodafone.clear()
                 await self.proxy.stop()
                 await self.dns_server.stop()
                 self.active_strategy = None
@@ -549,6 +649,10 @@ class Daemon:
                                       "disabled_domains")):
             if self.config["enabled"]:
                 self.trigger_search("ayar değişikliği")
+
+        if any(k in changed for k in ("vodafone_mode", "vodafone_networks",
+                                      "vodafone_ttl", "vodafone_disable_ipv6")):
+            self._apply_vodafone()
 
         if "verbose" in changed:
             logging.getLogger().setLevel(
@@ -570,6 +674,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cleanup:
         Firewall().clear()
+        VodafoneMode().clear()
         log.info("Kurallar temizlendi.")
         return 0
 

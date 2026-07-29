@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<policyconfig>
+  <vendor>DPI Bypass</vendor>
+  <vendor_url>https://github.com/atomgameraga/DPI-Bypass-Linux</vendor_url>
+  <action id="xyz.atomland.DpiBypass.vodafone-mode">
+    <description>Vodafone sınırsız modunu değiştir</description>
+    <description xml:lang="tr">Vodafone sınırsız modunu değiştir</description>
+    <message>Giden paketlerin TTL değerini değiştirmek için kimlik doğrulaması gerekiyor.</message>
+    <message xml:lang="tr">Giden paketlerin TTL değerini değiştirmek için kimlik doğrulaması gerekiyor.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/dpi-bypass/vodafone-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>

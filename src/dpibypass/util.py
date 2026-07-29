@@ -22,13 +22,18 @@ def which(name: str) -> str | None:
 
 
 def run(cmd: Sequence[str], *, check: bool = False, timeout: int = 20,
-        input_text: str | None = None) -> subprocess.CompletedProcess:
-    """Komutu çalıştır, çıktıyı yakala. Hata fırlatmaz (check=True olmadıkça)."""
+        input_text: str | None = None,
+        capture: bool = True) -> subprocess.CompletedProcess:
+    """Komutu çalıştır, çıktıyı yakala. Hata fırlatmaz (check=True olmadıkça).
+
+    ``capture=False``, çıktının ve girdinin çağıran uçbirime bağlı kalmasını
+    sağlar; pkexec gibi kullanıcıya parola soran komutlar için gerekir.
+    """
     log.debug("run: %s", " ".join(cmd))
     try:
         return subprocess.run(
             list(cmd),
-            capture_output=True,
+            capture_output=capture,
             text=True,
             timeout=timeout,
             check=check,

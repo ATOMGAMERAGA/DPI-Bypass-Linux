@@ -105,6 +105,64 @@ başarısız bağlantılar sayılır ve arama kendiliğinden tekrarlanır.
 
 ---
 
+## Vodafone sınırsız modu
+
+Vodafone'un "Red Sınırsız" tarifelerinde mobil veri sınırsızdır, ancak
+**hotspot/tethering 15 GB ile sınırlıdır**. Operatör paylaşımı paketin **TTL**
+(IPv6'da hop limit) değerinden anlar: telefonun kendi trafiği operatöre `64`
+ile ulaşır, laptoptan gelen paket ise telefonda bir kez yönlendirildiği için
+`63` olarak varır ve kotadan düşer.
+
+Bu mod, bu bilgisayardan çıkan paketleri **TTL 65** ile yollar. Telefon bir
+düşürünce operatöre tam `64` gider.
+
+**Nasıl açılır:** Ayarlar → Gelişmiş → *Vodafone sınırsız modu*. Açarken
+polkit üzerinden **yönetici parolası** sorulur. Komut satırından:
+
+```bash
+dpi-bypass vodafone status     # durum + paket sayacı
+dpi-bypass vodafone on
+dpi-bypass vodafone off
+```
+
+**Yalnızca kaydedildiği ağda çalışır.** Modu açtığınız andaki ağın parmak izi
+kaydedilir; ev Wi-Fi'ına ya da Ethernet'e geçtiğinizde kural kendiliğinden
+kalkar, telefona döndüğünüzde geri gelir. Kurallar `inet dpibypass_ttl`
+tablosunda, `oifname` ile yalnızca ilgili arayüze bağlı olarak tutulur.
+
+**Atlatma bozulmaz.** `disorder` ve `fake` stratejileri kasıtlı olarak düşük
+TTL'li (2-8) paketler gönderir; bu paketlerin DPI'ı geçip sunucuya
+*ulaşmaması* atlatmanın çalışma ilkesidir. Bu yüzden TTL yeniden yazımı
+yalnızca TTL'i **32'nin üstünde** olan paketlere uygulanır. Eşik, bir test
+(`test_ttl_guard_desync_stratejilerinin_uzerinde`) ile korunur: ileride daha
+yüksek TTL'li bir strateji eklenirse test kırmızıya döner.
+
+**IPv6.** Telefon tethering yaparken laptopa kendi global IPv6 adresini verir;
+o zaman operatör aynı aboneden iki farklı IPv6 kaynağı görür ve hop limit ne
+olursa olsun paylaşım anlaşılır. Bu yüzden mod, varsayılan olarak yalnızca
+tethering arayüzünde IPv6'yı kapatır (`vodafone_disable_ipv6`) ve kapanırken
+eski değeri geri yazar.
+
+> **Polkit kapısı hakkında dürüst not:** `dpi-bypass` grubundaki bir kullanıcı
+> zaten denetim soketine doğrudan `vodafone.enable` komutu yollayabilir. Yani
+> parola sorma adımı **teknik bir güvenlik sınırı değildir**; sistem genelinde
+> paket başlığı değiştiren bir ayarın yanlışlıkla ya da fark edilmeden
+> açılmasını engelleyen bilinçli bir onay adımıdır.
+
+> **Kullanım koşulları uyarısı:** Bu mod, operatör sözleşmenizin kullanım
+> koşullarına aykırıdır. Otomatik sayacı atlatır, ancak çok yüksek kullanım
+> (ayda yüzlerce GB üzeri) adil kullanım incelemesine takılabilir — orada
+> TTL'in bir etkisi olmaz. Sorumluluk kullanıcıya aittir.
+
+Kuralın gerçekten çalıştığını görmek için:
+
+```bash
+sudo nft list table inet dpibypass_ttl
+sudo tcpdump -ni <arayüz> -v -c 5 'tcp port 443' | grep -o 'ttl [0-9]*'
+```
+
+---
+
 ## Arayüz
 
 GTK4 + libadwaita ile yazılmıştır; GNOME'un kendi bileşenlerini kullanır
@@ -129,6 +187,7 @@ dpi-bypass strategies      # yöntem listesi
 dpi-bypass logs -f         # canlı günlük
 dpi-bypass set mode=all dns_provider=quad9
 dpi-bypass disable / enable
+dpi-bypass vodafone status  # hotspot TTL düzeltmesi (on / off)
 ```
 
 ---
@@ -169,6 +228,10 @@ yönetebilir (polkit kuralı kurulur). Kurulum betiği sizi bu gruba ekler.
 | `recheck_interval` | `1800` | Düzenli denetim aralığı (saniye, 0 = kapalı) |
 | `extra_domains` | `[]` | Elle eklenen alan adları |
 | `gui_autostart` | `true` | Oturum açılışında arayüzü başlat |
+| `vodafone_mode` | `false` | Vodafone sınırsız modu (hotspot TTL düzeltmesi) |
+| `vodafone_networks` | `[]` | Modun etkin olacağı ağlar (en fazla 10) |
+| `vodafone_ttl` | `65` | Giden paketlere yazılacak TTL (ileri düzey) |
+| `vodafone_disable_ipv6` | `true` | Tethering arayüzünde IPv6'yı kapat |
 
 Öğrenilen ağlar ve alan adları: `/var/lib/dpi-bypass/state.json`
 
@@ -209,6 +272,7 @@ src/dpibypass/
   dnsserver.py   yerel DNS köprüsü
   proxy.py       şeffaf TCP vekil
   firewall.py    nftables / iptables kuralları
+  vodafone.py    hotspot TTL düzeltmesi (ayrı tabloda, eşik korumalı)
   netmon.py      netlink ağ değişikliği izleyicisi
   isps.py        operatör profilleri ve saptama
   tester.py      gerçek bağlantı testleri

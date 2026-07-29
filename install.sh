@@ -11,12 +11,14 @@ set -euo pipefail
 
 APP_NAME="DPI Bypass"
 APP_ID="xyz.atomland.DpiBypass"
-APP_VERSION="1.0.0"
+APP_VERSION="1.1.0"
 REPO="${DPI_BYPASS_REPO:-atomgameraga/DPI-Bypass-Linux}"
 BRANCH="${DPI_BYPASS_BRANCH:-main}"
 
 PREFIX="/usr"
 LIBDIR="$PREFIX/lib/dpi-bypass"
+# polkit .policy dosyasındaki exec.path ile birebir aynı olmalı
+LIBEXECDIR="$PREFIX/libexec/dpi-bypass"
 BINDIR="$PREFIX/bin"
 DATADIR="$PREFIX/share"
 UNITDIR="/usr/lib/systemd/system"
@@ -236,6 +238,10 @@ install_files() {
         install -m 0755 "$SRC_DIR/bin/$launcher" "$BINDIR/$launcher"
     done
 
+    # Vodafone kipi için polkit ile çağrılan yetkilendirme yardımcısı
+    install -d -m 0755 "$LIBEXECDIR"
+    install -m 0755 "$SRC_DIR/bin/vodafone-helper" "$LIBEXECDIR/vodafone-helper"
+
     # Simgeler
     for size in 16 22 24 32 48 64 128 256 512; do
         src="$SRC_DIR/data/icons/hicolor/${size}x${size}/apps/$APP_ID.png"
@@ -262,6 +268,10 @@ install_files() {
         install -Dm0644 "$SRC_DIR/data/polkit/49-dpi-bypass.rules" \
             "/usr/share/polkit-1/rules.d/49-dpi-bypass.rules"
     fi
+
+    # polkit eylemi: Vodafone kipi açılıp kapatılırken yönetici parolası sorar
+    install -Dm0644 "$SRC_DIR/data/polkit/$APP_ID.policy" \
+        "$DATADIR/polkit-1/actions/$APP_ID.policy"
 
     # systemd birimi
     if [ ! -d "$UNITDIR" ]; then UNITDIR="/lib/systemd/system"; fi
@@ -385,11 +395,12 @@ uninstall() {
     "$BINDIR/dpi-bypassd" --cleanup >/dev/null 2>&1 || true
     rm -f "$UNITDIR/$SERVICE" "/lib/systemd/system/$SERVICE"
     rm -f "$BINDIR/dpi-bypass" "$BINDIR/dpi-bypassd" "$BINDIR/dpi-bypass-gui"
-    rm -rf "$LIBDIR"
+    rm -rf "$LIBDIR" "$LIBEXECDIR"
     rm -f "$DATADIR/applications/$APP_ID.desktop"
     rm -f "$DATADIR/metainfo/$APP_ID.metainfo.xml"
     rm -f "/etc/xdg/autostart/$APP_ID-autostart.desktop"
     rm -f "/usr/share/polkit-1/rules.d/49-dpi-bypass.rules"
+    rm -f "$DATADIR/polkit-1/actions/$APP_ID.policy"
     rm -f "$DATADIR"/icons/hicolor/*/apps/"$APP_ID".png
     rm -f "$DATADIR/icons/hicolor/scalable/apps/$APP_ID.svg"
     rm -f "$DATADIR/icons/hicolor/symbolic/apps/$APP_ID-symbolic.svg"

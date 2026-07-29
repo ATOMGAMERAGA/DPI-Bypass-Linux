@@ -12,7 +12,9 @@ import time
 
 from .constants import SOCKET_GROUP
 from .ipc import IpcClient
+from .util import is_root, run, which
 from .version import APP_NAME, AUTHOR, __version__
+from .vodafone import helper_path
 
 GREEN = "\033[32m"
 RED = "\033[31m"
@@ -70,7 +72,25 @@ def cmd_status(client: IpcClient, args) -> int:
           f"{data['firewall']['ips']} IP · kip {data['firewall']['mode']}")
     print(f"  Trafik     : {data['proxy']['connections']} bağlantı, "
           f"{data['proxy']['bypassed']} atlatıldı")
+    vodafone = data.get("vodafone")
+    if vodafone:
+        print(f"  Vodafone modu : {_vodafone_line(vodafone)}")
     return 0
+
+
+def _vodafone_line(vodafone: dict) -> str:
+    """Durum çıktısındaki tek satırlık Vodafone özeti."""
+    if not vodafone.get("mode"):
+        return _color("kapalı", DIM)
+    if vodafone.get("active"):
+        return (_color("etkin", GREEN)
+                + f" ({vodafone.get('interface', '-')}, "
+                f"TTL {vodafone.get('ttl', '-')}, "
+                f"{vodafone.get('packets', 0)} paket)")
+    if not vodafone.get("registered"):
+        return _color("beklemede", YELLOW) + \
+            f" — bu ağ kayıtlı değil ({vodafone.get('network', '-')})"
+    return _color("beklemede", YELLOW) + " — kural uygulanmadı"
 
 
 def cmd_search(client: IpcClient, args) -> int:
@@ -183,6 +203,62 @@ def cmd_set(client: IpcClient, args) -> int:
     return 0
 
 
+def cmd_vodafone(client: IpcClient, args) -> int:
+    """Vodafone sınırsız kipi: durum görüntüle, aç, kapat."""
+    if args.action == "status":
+        response = client.call("vodafone.verify")
+        if not response.get("ok"):
+            return _fail(response)
+        data = response["data"]
+        print(f"{BOLD}Vodafone sınırsız modu{RESET}")
+        print(f"  Durum   : {_vodafone_line(data)}")
+        print(f"  Arka uç : {data.get('backend', '-')}")
+        print(f"  Ağ      : {data.get('network', '-')}"
+              + (" (kayıtlı)" if data.get("registered") else " (kayıtlı değil)"))
+        print(f"  IPv6    : "
+              + ("arayüzde kapatıldı" if data.get("ipv6_disabled")
+                 else "dokunulmadı"))
+        networks = data.get("networks") or []
+        if networks:
+            print("  Kayıtlı ağlar:")
+            for net in networks:
+                print(f"    · {net.get('name', '-')} "
+                      f"({net.get('interface', '-')})")
+        return 0
+
+    action = "enable" if args.action == "on" else "disable"
+
+    # Root isek doğrudan servise söyle; değilsek arayüzle aynı yetkilendirme
+    # yolunu kullan (pkexec → polkit → yardımcı betik).
+    if is_root():
+        response = client.call(f"vodafone.{action}")
+        if not response.get("ok"):
+            return _fail(response)
+    else:
+        helper = helper_path()
+        if helper is None:
+            print(_color("Hata: ", RED) + "vodafone-helper bulunamadı; "
+                  "kurulum eksik görünüyor.")
+            return 1
+        if which("pkexec") is None:
+            print(_color("Hata: ", RED) + "pkexec bulunamadı; polkit paketi "
+                  "kurulu değil.")
+            return 1
+        result = run(["pkexec", helper, action], timeout=300, capture=False)
+        if result.returncode in (126, 127):
+            print("İşlem iptal edildi (yetki verilmedi).")
+            return 1
+        if result.returncode != 0:
+            print(_color("Hata: ", RED) + "Vodafone modu değiştirilemedi.")
+            return 1
+
+    print("Vodafone sınırsız modu açıldı." if args.action == "on"
+          else "Vodafone sınırsız modu kapatıldı.")
+    # Durum çıktısı yalnızca bilgilendirmedir; çıkış kodunu etkilemez.
+    cmd_vodafone(client, argparse.Namespace(action="status"))
+    return 0
+
+
 def cmd_config(client: IpcClient, args) -> int:
     response = client.call("config.get")
     if not response.get("ok"):
@@ -226,6 +302,12 @@ def main(argv: list[str] | None = None) -> int:
     p_set = sub.add_parser("set", help="ayar değiştir (örn: mode=all)")
     p_set.add_argument("pairs", nargs="+")
     p_set.set_defaults(func=cmd_set)
+
+    p_vodafone = sub.add_parser(
+        "vodafone", help="Vodafone sınırsız kipi (hotspot TTL düzeltmesi)")
+    p_vodafone.add_argument("action", choices=("status", "on", "off"),
+                            nargs="?", default="status")
+    p_vodafone.set_defaults(func=cmd_vodafone)
 
     args = parser.parse_args(argv)
     if not getattr(args, "func", None):

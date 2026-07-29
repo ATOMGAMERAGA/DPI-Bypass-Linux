@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 
 from gi.repository import Adw, Gio, GLib, Gtk
 
 from ..constants import SOCKET_GROUP
+from ..util import run, which
 from ..version import APP_ID, APP_NAME, AUTHOR, WEBSITE, __version__
+from ..vodafone import helper_path
 from .client import DaemonClient
-from .widgets import (Banner, HAS_ABOUT_DIALOG, button_row, combo_row,
+from .widgets import (Banner, HAS_ABOUT_DIALOG, button_row, combo_row, idle,
                       message, spin_row, switch_row, toolbar_view)
 
 MODE_LABELS = [
@@ -46,6 +49,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.strategy_list: list[dict] = []
         self.isp_list: list[dict] = []
         self._loading = True
+        self._vodafone_busy = False
         self._log_since = 0.0
         self._log_lines: list[str] = []
 
@@ -260,6 +264,18 @@ class MainWindow(Adw.ApplicationWindow):
         page.add(dns_group)
 
         advanced = Adw.PreferencesGroup(title="Gelişmiş")
+        self.row_vodafone, _ = switch_row(
+            "Vodafone sınırsız modu",
+            "Telefon paylaşımında 15 GB hotspot sınırını devre dışı bırakır. "
+            "Yönetici parolası sorulur.",
+            False, self._on_vodafone_toggled)
+        advanced.add(self.row_vodafone)
+
+        self.row_vodafone_info = Adw.ActionRow(
+            title="Mod durumu", subtitle="kapalı")
+        self.row_vodafone_info.add_css_class("property")
+        advanced.add(self.row_vodafone_info)
+
         self.row_verbose, _ = switch_row(
             "Ayrıntılı günlük", "Sorun ararken açın", False,
             lambda v: self._set_config(verbose=v))
@@ -383,6 +399,9 @@ class MainWindow(Adw.ApplicationWindow):
         self.row_dns_intercept.set_active(bool(self.config.get("dns_intercept", True)))
         self.row_quic.set_active(bool(self.config.get("block_quic", True)))
         self.row_verbose.set_active(bool(self.config.get("verbose", False)))
+        if not self._vodafone_busy:
+            self.row_vodafone.set_active(bool(self.config.get("vodafone_mode",
+                                                              False)))
         self.row_interval.set_value(float(self.config.get("recheck_interval", 1800)))
         mode = self.config.get("mode", "smart")
         self.row_mode.set_selected(
@@ -458,6 +477,95 @@ class MainWindow(Adw.ApplicationWindow):
                 handle.write(content)
         except OSError as exc:
             self.toast(f"Otomatik başlatma ayarlanamadı: {exc}")
+
+    # -- Vodafone sınırsız kipi -------------------------------------------
+    def _on_vodafone_toggled(self, active: bool) -> None:
+        if self._loading:          # durum yenilerken tetiklenmesin
+            return
+        if self._vodafone_busy:
+            return
+        helper = helper_path()
+        if helper is None:
+            self.toast("vodafone-helper bulunamadı; kurulum eksik görünüyor.")
+            self._set_vodafone_switch(not active)
+            return
+        if which("pkexec") is None:
+            self.toast("pkexec bulunamadı; polkit paketi kurulu değil.")
+            self._set_vodafone_switch(not active)
+            return
+        if active and not (self.config.get("vodafone_networks") or []):
+            self._show_vodafone_notice()
+
+        self._vodafone_busy = True
+        self.row_vodafone.set_sensitive(False)
+        self.row_vodafone_info.set_subtitle(
+            "yetki bekleniyor…" if active else "kapatılıyor…")
+        action = "enable" if active else "disable"
+        threading.Thread(target=self._vodafone_worker,
+                         args=(helper, action, active), daemon=True).start()
+
+    def _vodafone_worker(self, helper: str, action: str, active: bool) -> None:
+        """pkexec'i arka planda çalıştır; GTK ana döngüsü kilitlenmesin."""
+        try:
+            result = run(["pkexec", helper, action], timeout=300)
+            code, error = result.returncode, (result.stderr or "").strip()
+        except Exception as exc:      # beklenmedik hata anahtarı kilitlemesin
+            code, error = 1, str(exc)
+        idle(self._on_vodafone_done, active, code, error)
+
+    def _on_vodafone_done(self, active: bool, code: int, stderr: str) -> None:
+        self._vodafone_busy = False
+        self.row_vodafone.set_sensitive(True)
+        if code in (126, 127):
+            # Kullanıcı iptal etti ya da yetki verilmedi: sessizce geri al.
+            self._set_vodafone_switch(not active)
+            self.toast("İşlem iptal edildi")
+        elif code != 0:
+            self._set_vodafone_switch(not active)
+            self.toast(stderr or "Vodafone modu değiştirilemedi")
+        # Sunucudaki gerçek duruma göre yenile
+        self.client.call("config.get", self._on_config)
+        self.client.call("status", self._on_status)
+
+    def _set_vodafone_switch(self, active: bool) -> None:
+        """Anahtarı işleyiciyi tetiklemeden ayarla."""
+        previous = self._loading
+        self._loading = True
+        self.row_vodafone.set_active(active)
+        self._loading = previous
+
+    def _show_vodafone_notice(self) -> None:
+        network = (self.status.get("network") or {}).get("name") or "bu ağ"
+        message(
+            self, "Vodafone sınırsız modu",
+            "Bu mod, bu bilgisayardan çıkan paketlerin TTL değerini 65 yapar. "
+            "Telefonunuz paketi ilettiğinde değer 64'e düşer ve operatör "
+            "trafiği telefondan geliyormuş gibi görür.\n\n"
+            "Bu, operatör sözleşmenizin kullanım koşullarına aykırıdır. "
+            "Otomatik sayacı atlatır, ancak çok yüksek kullanım (ayda yüzlerce "
+            "GB üzeri) adil kullanım incelemesine takılabilir — orada TTL'in "
+            "bir etkisi olmaz.\n\n"
+            f"Mod yalnızca {network} ağında etkin olur. Diğer ağlara "
+            "geçtiğinizde kendiliğinden devre dışı kalır.")
+
+    def _refresh_vodafone(self, vodafone: dict) -> None:
+        """Anahtarı ve durum satırını servisten gelen bilgiyle güncelle."""
+        if self._vodafone_busy:
+            return
+        self._set_vodafone_switch(bool(vodafone.get("mode")))
+        if not vodafone.get("mode"):
+            self.row_vodafone_info.set_subtitle("kapalı")
+            return
+        if vodafone.get("active"):
+            self.row_vodafone_info.set_subtitle(
+                f"etkin · {vodafone.get('interface', '-')} · "
+                f"TTL {vodafone.get('ttl', '-')} · "
+                f"{vodafone.get('packets', 0)} paket düzeltildi")
+        elif not vodafone.get("registered"):
+            self.row_vodafone_info.set_subtitle(
+                f"kayıtlı değil — {vodafone.get('network', '-')}")
+        else:
+            self.row_vodafone_info.set_subtitle("beklemede — kural uygulanmadı")
 
     def _set_config(self, **values) -> None:
         if self._loading:
@@ -553,6 +661,7 @@ class MainWindow(Adw.ApplicationWindow):
             f"{proxy.get('bypassed', 0)} atlatıldı · "
             f"çalışma süresi {self._fmt_uptime(data.get('uptime', 0))}")
 
+        self._refresh_vodafone(data.get("vodafone") or {})
         self._refresh_results(data.get("last_results", []))
         self._refresh_learned(data.get("learned_domains", []))
 
