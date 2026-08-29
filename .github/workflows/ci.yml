@@ -1,7 +1,11 @@
 name: CI
 
+# Aynı depoda açılan dallarda hem push hem pull_request tetiklenip işlerin iki
+# kez koşmaması için push yalnızca main ile sınırlandırıldı.
 on:
   push:
+    branches:
+      - main
   pull_request:
 
 permissions:
@@ -26,11 +30,18 @@ jobs:
           - "3.14"
 
     steps:
+      # Ayrıcalıklı bir sistem aracı olduğumuz için action'lar hareketli etiket
+      # yerine commit SHA'sına sabitlendi: etiket yeniden işaretlense bile
+      # çalışan kod değişmez. Yükseltirken yorumdaki sürümü de güncelleyin.
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # Bu iş akışı hiçbir şey itmiyor; token'ı .git/config içinde
+          # bırakmayalım (fork PR'larında test kodu depo ile aynı adımda koşar).
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -49,7 +60,9 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Validate installer shell syntax
         run: bash -n install.sh
