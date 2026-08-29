@@ -18,16 +18,24 @@ concurrency:
 jobs:
   tests:
     name: Python ${{ matrix.python-version }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        python-version:
-          - "3.8"
-          - "3.10"
-          - "3.12"
-          - "3.14"
+        # 3.8 imaja sabitlendi: actions/python-versions 3.8 için yalnızca
+        # 24.04'e kadar build üretiyor. ubuntu-latest ileride 26.04'e
+        # taşındığında bu iş sessizce kırılmasın. Diğer sürümlerde
+        # ubuntu-latest kalır, böylece yeni imaj da denenmiş olur.
+        include:
+          - python-version: "3.8"
+            os: ubuntu-24.04
+          - python-version: "3.10"
+            os: ubuntu-latest
+          - python-version: "3.12"
+            os: ubuntu-latest
+          - python-version: "3.14"
+            os: ubuntu-latest
 
     steps:
       # Ayrıcalıklı bir sistem aracı olduğumuz için action'lar hareketli etiket
