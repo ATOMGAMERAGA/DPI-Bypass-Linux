@@ -1306,10 +1306,12 @@ class TestRevalidation(OptimizerCase):
         self.assertEqual(status["state"], "active")
 
         runner.power["wlan0"] = "on"       # kullanıcı geri açtı
-        optimizer._last_revalidate = 0.0
+        # "Hiç denetlenmedi" durumu None'dır; 0.0 makine açılış süresine
+        # bağlı olurdu ve yeni açılmış bir makinede cooldown'a takılırdı.
+        optimizer._last_revalidate = None
         # Histerezis: tek denetim yetmez.
         self.assertIsNone(await optimizer.revalidate(network()))
-        optimizer._last_revalidate = 0.0
+        optimizer._last_revalidate = None
         result = await optimizer.revalidate(network())
         self.assertIsNotNone(result)
         self.assertEqual(result["state"], "external-change")
@@ -1320,9 +1322,34 @@ class TestRevalidation(OptimizerCase):
         probe = StateProbe(runner, {("off", None, None, None): 12.0}, 20.0)
         optimizer = self.make_optimizer(runner, probe)
         await optimizer.optimize(network())
-        optimizer._last_revalidate = 0.0
+        optimizer._last_revalidate = None
         self.assertIsNone(await optimizer.revalidate(network()))
         self.assertEqual(optimizer.status.state, "active")
+
+    async def test_first_check_is_not_suppressed_on_a_freshly_booted_machine(self):
+        """``time.monotonic()`` makine açılışından beri geçen süredir.
+
+        Cooldown'ı 0.0 ile karşılaştırmak, monotonic saatin cooldown'dan
+        küçük olduğu her makinede (yani yeni açılmış olanlarda) ilk denetimi
+        bastırırdı — CI runner'larında olan tam olarak buydu.
+
+        Koşul, saati kurcalamadan yeniden üretilir: cooldown'ı gerçek
+        monotonic değerden büyük yapmak, "0 ile karşılaştırma" hatası varsa
+        denetimin bastırılmasına yol açar.
+        """
+        runner = FakeRunner()
+        probe = StateProbe(runner, {("off", None, None, None): 12.0}, 20.0)
+        optimizer = self.make_optimizer(runner, probe)
+        await optimizer.optimize(network())
+        # Hiç denetlenmemiş durum 0.0 değil None ile temsil edilmeli.
+        self.assertIsNone(optimizer._last_revalidate)
+
+        optimizer.REVALIDATE_COOLDOWN = 10 ** 9   # her monotonic değerinden büyük
+        optimizer.REVALIDATE_STRIKES = 1
+        runner.power["wlan0"] = "on"              # kullanıcı ayarı geri açtı
+        result = await optimizer.revalidate(network())
+        self.assertIsNotNone(result, "ilk denetim cooldown'a takıldı")
+        self.assertEqual(result["state"], "external-change")
 
     async def test_revalidation_respects_the_cooldown(self):
         runner = FakeRunner()
@@ -1330,8 +1357,12 @@ class TestRevalidation(OptimizerCase):
         optimizer = self.make_optimizer(runner, probe)
         await optimizer.optimize(network())
         runner.power["wlan0"] = "on"
-        # Cooldown dolmadan denetim yapılmaz: salınım döngüsü kurulmaz.
+        # Az önce denetlenmiş gibi işaretle; cooldown dolmadan yeni denetim
+        # yapılmamalı ki doğal dalgalanmada salınım döngüsü kurulmasın.
+        import time as _time
+        optimizer._last_revalidate = _time.monotonic()
         self.assertIsNone(await optimizer.revalidate(network()))
+        self.assertEqual(optimizer._strikes, 0)
 
 
 # --------------------------------------------------------------------------- #

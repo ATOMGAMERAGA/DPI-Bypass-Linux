@@ -272,7 +272,11 @@ class LatencyOptimizer:
         self._generation = 0
         #: Snapshot bozuksa yeni mutasyon yapılmaz.
         self._blocked = ""
-        self._last_revalidate = 0.0
+        #: Son denetimin monotonic zamanı. ``None`` = hiç denetlenmedi.
+        #: 0.0 KULLANILMAZ: ``time.monotonic()`` makinenin açılışından beri
+        #: geçen süredir ve yeni açılmış bir makinede küçüktür; 0 ile
+        #: karşılaştırmak ilk denetimi cooldown süresi boyunca bastırırdı.
+        self._last_revalidate = None
         self._strikes = 0
         self._plan: "probemod.ProbePlan | None" = None
         self._active_context: "ProfileContext | None" = None
@@ -1239,7 +1243,8 @@ class LatencyOptimizer:
         if not self.status.active or self.status.state != STATE_ACTIVE:
             return None
         now = time.monotonic()
-        if now - self._last_revalidate < self.REVALIDATE_COOLDOWN:
+        if self._last_revalidate is not None and \
+                now - self._last_revalidate < self.REVALIDATE_COOLDOWN:
             return None
         self._last_revalidate = now
         async with self._get_lock():
