@@ -28,7 +28,8 @@ from .desync import capabilities
 from .dnsserver import DnsServer
 from .firewall import Firewall, FirewallError
 from .ipc import IpcServer
-from .latency import LatencyError, LatencyOptimizer
+from .latency import (LatencyError, LatencyOptimizer, LatencySettings,
+                      LoadBudget, LoadTarget, TargetSpec)
 from .netmon import NetworkFingerprint, NetworkMonitor, fingerprint
 from .proxy import TransparentProxy
 from .resolver import shared as dns_resolver
@@ -65,7 +66,7 @@ class Daemon:
         self.tester = Tester(self.resolver)
         self.firewall = Firewall(PROXY_PORT, DNS_PORT)
         self.vodafone = self._make_vodafone()
-        self.latency = LatencyOptimizer()
+        self.latency = LatencyOptimizer(settings=self._latency_settings())
         self.proxy = TransparentProxy(
             PROXY_PORT, self._current_strategy, self._should_bypass, self._on_result
         )
@@ -469,6 +470,21 @@ class Daemon:
                 return
             self._latency_task = asyncio.ensure_future(self.latency.optimize(fp))
 
+    async def _stop_latency_task(self) -> None:
+        """Devam eden ölçüm işini bitir; ayarları geri almayı çağırana bırak."""
+        lock = self._latency_control_lock
+        if lock is None:
+            return
+        async with lock:
+            current = self._latency_task
+            if current is not None and not current.done():
+                self.latency.request_cancel()
+                try:
+                    await current
+                except asyncio.CancelledError:
+                    pass
+            self._latency_task = None
+
     async def _stop_latency(self) -> bool:
         """Devam eden ölçümü durdur ve uygulanmış bütün ayarları geri al."""
         lock = self._latency_control_lock
@@ -506,10 +522,96 @@ class Daemon:
         await asyncio.sleep(1.0)
         self.trigger_search(f"ağ değişti → {fp.name}")
 
+    @staticmethod
+    def _redact(value, mapping: dict):
+        """Hedef kimliklerini rapordan çıkar, ölçüm verisini koru.
+
+        İki katman:
+
+        * Kimlik taşıyan anahtarlar (``host``, ``address``, ``source``,
+          ``display``, ``label``) tamamen düşürülür.
+        * Serbest metinlerde (mesajlar, gerekçeler, atlama notları) geçen
+          aynı değerler kararlı bir yer tutucuyla değiştirilir. Bu ikinci
+          katman olmadan hedef adı ``skipped`` notlarında ve karar
+          gerekçelerinde sızardı.
+        """
+        if isinstance(value, dict):
+            return {key: Daemon._redact(item, mapping)
+                    for key, item in value.items()
+                    if key not in ("host", "address", "source", "display",
+                                   "label")}
+        if isinstance(value, list):
+            return [Daemon._redact(item, mapping) for item in value]
+        if isinstance(value, str):
+            for secret, placeholder in mapping.items():
+                if secret and secret in value:
+                    value = value.replace(secret, placeholder)
+            return value
+        return value
+
+    def _redaction_map(self, status: dict) -> dict:
+        """Rapordan çıkarılacak kimlikler → kararlı yer tutucular."""
+        secrets: list = []
+
+        def note(text) -> None:
+            text = str(text or "")
+            if len(text) >= 3 and text not in secrets:
+                secrets.append(text)
+
+        for target in self.latency.settings.targets:
+            note(target.host)
+            note(target.label)
+        for key in ("before", "after"):
+            measurement = status.get(key) or {}
+            for endpoint in measurement.get("endpoints") or []:
+                for field in ("host", "address", "source", "display", "label"):
+                    note((endpoint.get("endpoint") or {}).get(field))
+        for text in status.get("targets") or []:
+            note(text)
+        note(self.network.ssid)
+        note(self.network.gateway)
+        note(self.network.gateway_mac)
+        # Uzun değerler önce değiştirilsin ki kısa bir parça uzununu bozmasın.
+        secrets.sort(key=len, reverse=True)
+        return {secret: f"<hedef-{index + 1}>"
+                for index, secret in enumerate(secrets)}
+
+    def _latency_report(self) -> dict:
+        """Paylaşılabilir tanı raporu.
+
+        Rapor yereldir, sınırlı boyuttadır ve varsayılan olarak gizlilik
+        korumalıdır: SSID, ağ geçidi ve MAC'i, dış IP ve kullanıcının hedef
+        adları/adresleri rapora KONMAZ — serbest metinlerde geçenler dahil.
+        Geriye ölçüm ve karar verileri kalır; teşhis için gereken budur.
+        """
+        raw = self._latency_status()
+        status = self._redact(raw, self._redaction_map(raw))
+        status.pop("targets", None)
+        settings = status.get("settings")
+        if isinstance(settings, dict):
+            settings["targets"] = len(self.latency.settings.targets)
+        return {
+            "version": __version__,
+            "generated_at": time.time(),
+            "redacted": True,
+            "network": {"key": self.network.key[:8],
+                        "link_type": self.network.link_type,
+                        "interface": self.network.interface},
+            "latency": status,
+        }
+
     async def _periodic_recheck(self) -> None:
         while True:
             interval = int(self.config["recheck_interval"] or 0)
             await asyncio.sleep(interval if interval > 0 else 600)
+            # Gecikme profilinin hafif denetimi, bypass denetiminden bağımsız
+            # çalışır: uygulanmış ayar hâlâ yürürlükte mi? Yeni benchmark
+            # başlatmaz, cooldown ve histerezis kullanır.
+            if self.config["latency_mode"]:
+                try:
+                    await self.latency.revalidate(self.network)
+                except Exception:
+                    log.exception("gecikme profili denetimi hata verdi")
             if interval <= 0 or not self.config["enabled"]:
                 continue
             if self.status not in (STATE_ACTIVE, STATE_DNS_ONLY):
@@ -573,11 +675,112 @@ class Daemon:
             "networks": self.config.vodafone_networks(),
         }
 
+    def _latency_settings(self) -> LatencySettings:
+        """Kullanıcının kalıcı tercihlerini motorun ayarlarına çevir.
+
+        Geçersiz kayıtlar sessizce yok sayılmaz: nedeni günlüğe yazılır ve
+        hedef listeye alınmaz. Yük testi ve SQM ayrı ayrı opt-in'dir ve
+        eksik/geçersiz yapılandırmada kendiliğinden etkinleşmez.
+        """
+        targets = []
+        for raw in self.config["latency_targets"] or []:
+            try:
+                targets.append(TargetSpec.from_dict(raw))
+            except (ValueError, TypeError) as exc:
+                log.warning("Gecikme ölçüm hedefi yok sayıldı (%s): %s",
+                            raw, exc)
+
+        load_target = None
+        raw_load = self.config["latency_load_target"] or {}
+        if raw_load:
+            try:
+                load_target = LoadTarget.from_dict(raw_load)
+            except (ValueError, TypeError) as exc:
+                log.warning("Yük testi hedefi yok sayıldı: %s", exc)
+
+        load_enabled = bool(self.config["latency_load_test"]) and \
+            load_target is not None and load_target.owned
+        if bool(self.config["latency_load_test"]) and not load_enabled:
+            log.warning("Yük testi açık ama onaylanmış bir hedef yok; "
+                        "yük uygulanmayacak")
+
+        settings = LatencySettings(
+            targets=targets,
+            load_test=load_enabled,
+            load_target=load_target,
+            load_budget=LoadBudget(
+                max_seconds=int(self.config["latency_load_max_seconds"] or 0),
+                max_bytes=int(self.config["latency_load_max_bytes"] or 0)),
+            metered=bool(self.config["latency_metered"]),
+            sqm=bool(self.config["latency_sqm"]),
+            uplink_kbit=int(self.config["latency_uplink_kbit"] or 0),
+            downlink_kbit=int(self.config["latency_downlink_kbit"] or 0),
+            max_throughput_loss=float(
+                self.config["latency_max_throughput_loss"] or 15.0),
+        )
+        if settings.sqm and settings.uplink_kbit <= 0:
+            log.warning("SQM kipi açık ama hat kapasitesi girilmemiş; "
+                        "shaping uygulanmayacak")
+        return settings
+
     def _latency_status(self) -> dict:
-        """Runtime durumuna kalıcı kullanıcı seçimini ekle."""
+        """Runtime durumuna kalıcı kullanıcı seçimini ekle.
+
+        ``enabled`` kullanıcının tercihidir; ``active`` şu anda yürürlükte
+        ve doğrulanmış ayarı gösterir. İkisi karıştırılmaz.
+        """
         data = self.latency.status_dict()
         data["enabled"] = bool(self.config["latency_mode"])
+        data["settings"] = {
+            "targets": [item.to_dict() for item in self.latency.settings.targets],
+            "load_test": self.latency.settings.load_test,
+            "sqm": self.latency.settings.sqm,
+            "uplink_kbit": self.latency.settings.uplink_kbit,
+            "downlink_kbit": self.latency.settings.downlink_kbit,
+        }
         return data
+
+    @staticmethod
+    def _validate_latency_values(values: dict) -> str:
+        """Gecikme ayarlarını kabul etmeden önce doğrula."""
+        for key in ("latency_mode", "latency_load_test", "latency_sqm",
+                    "latency_metered"):
+            if key in values and not isinstance(values[key], bool):
+                return f"{key} true/false olmalı"
+        for key, low, high in (("latency_uplink_kbit", 0, 10_000_000),
+                               ("latency_downlink_kbit", 0, 10_000_000),
+                               ("latency_load_max_seconds", 1, 60),
+                               ("latency_load_max_bytes", 1024, 512 * 1024 * 1024)):
+            if key not in values:
+                continue
+            value = values[key]
+            if isinstance(value, bool) or not isinstance(value, int) \
+                    or not low <= value <= high:
+                return f"{key} {low}-{high} aralığında bir tam sayı olmalı"
+        if "latency_max_throughput_loss" in values:
+            value = values["latency_max_throughput_loss"]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                    or not 0 <= float(value) <= 50:
+                return "latency_max_throughput_loss 0-50 aralığında olmalı"
+        if "latency_targets" in values:
+            raw = values["latency_targets"]
+            if not isinstance(raw, list) or len(raw) > 8:
+                return "latency_targets en çok 8 öğeli bir liste olmalı"
+            for item in raw:
+                try:
+                    TargetSpec.from_dict(item)
+                except (ValueError, TypeError) as exc:
+                    return f"geçersiz ölçüm hedefi: {exc}"
+        if "latency_load_target" in values:
+            raw = values["latency_load_target"]
+            if not isinstance(raw, dict):
+                return "latency_load_target bir nesne olmalı"
+            if raw:
+                try:
+                    LoadTarget.from_dict(raw)
+                except (ValueError, TypeError) as exc:
+                    return f"geçersiz yük testi hedefi: {exc}"
+        return ""
 
     async def _on_command(self, request: dict) -> dict:
         cmd = str(request.get("cmd", ""))
@@ -595,10 +798,9 @@ class Daemon:
                 values = request.get("values") or {}
                 if not isinstance(values, dict):
                     return {"ok": False, "error": "values bir nesne olmalı"}
-                if "latency_mode" in values and not isinstance(
-                        values["latency_mode"], bool):
-                    return {"ok": False,
-                            "error": "latency_mode true/false olmalı"}
+                problem = self._validate_latency_values(values)
+                if problem:
+                    return {"ok": False, "error": problem}
                 changed = self.config.update(values)
                 await self._apply_config_change(changed)
                 return {"ok": True, "data": {"changed": changed,
@@ -651,11 +853,22 @@ class Daemon:
 
             if cmd == "latency.test":
                 self.network = fingerprint()
+                condition = str(request.get("condition") or "idle")
                 try:
-                    measured = await self.latency.measure_only(self.network)
+                    measured = await self.latency.measure_only(
+                        self.network, condition=condition)
                 except LatencyError as exc:
                     return {"ok": False, "error": str(exc)}
                 return {"ok": True, "data": measured.to_dict()}
+
+            if cmd == "latency.cancel":
+                await self._stop_latency_task()
+                return {"ok": True, "data": await self.latency.cancel()}
+
+            if cmd == "latency.report":
+                # Tanı raporu: yerel, sınırlı boyutta ve varsayılan olarak
+                # gizlilik korumalı. SSID, MAC ve dış IP rapora girmez.
+                return {"ok": True, "data": self._latency_report()}
 
             if cmd == "logs":
                 since = float(request.get("since") or 0)
@@ -731,6 +944,16 @@ class Daemon:
                           "(%d) geri yazıldı", exc, self.vodafone.ttl)
                 # Yapılandırma dosyası da gerçeği göstersin.
                 self.config.update({"vodafone_ttl": self.vodafone.ttl})
+
+        if any(key.startswith("latency_") and key != "latency_mode"
+               for key in changed):
+            # Hedef/yük/SQM ayarları değişti: motorun ayarlarını tazele. Aktif
+            # bir profil varsa artık başka koşullarda ölçülmüş sayılır ve
+            # yeniden doğrulanmadan "aktif kazanç" gösterilmez.
+            self.latency.settings = self._latency_settings()
+            if self.config["latency_mode"]:
+                self.network = fingerprint()
+                await self._restart_latency(self.network)
 
         if "latency_mode" in changed:
             if self.config["latency_mode"]:

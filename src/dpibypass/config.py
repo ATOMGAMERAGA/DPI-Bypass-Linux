@@ -31,6 +31,25 @@ DEFAULTS: dict[str, Any] = {
     "verbose": False,
     # --- Ölçümlü düşük gecikme kipi ----------------------------------------
     "latency_mode": False,
+    # Kullanıcının kendi ölçüm hedefleri: [{"host","port","protocol","label"}]
+    # Boşsa genel ağ göstergesi hedefleri kullanılır ve sonuç öyle etiketlenir
+    # (oyun ping'i olarak sunulmaz).
+    "latency_targets": [],
+    # --- Yük altında ölçüm (opt-in) -----------------------------------------
+    # Bu ayarlar güncelleme sonrasında KENDİLİĞİNDEN etkinleşmez: varsayılan
+    # kapalıdır ve yük hedefi tanımlanmadan yük testi başlamaz.
+    "latency_load_test": False,
+    "latency_load_target": {},          # {"host","port","mode","path","owned"}
+    "latency_load_max_seconds": 12,
+    "latency_load_max_bytes": 64 * 1024 * 1024,
+    "latency_metered": False,           # ölçümlü/mobil bağlantı uyarısı
+    # --- Yük altında düşük gecikme (SQM) kipi (opt-in, Beta) ----------------
+    # Gerçek shaping uygular ve bant genişliğinden feragat eder; bu yüzden
+    # yalnız kullanıcı açtığında ve kapasiteyi girdiğinde devreye girer.
+    "latency_sqm": False,
+    "latency_uplink_kbit": 0,           # 0 = bilinmiyor; shaping yapılmaz
+    "latency_downlink_kbit": 0,
+    "latency_max_throughput_loss": 15.0,
     # --- Vodafone sınırsız kipi ---------------------------------------------
     "vodafone_mode": False,             # ana anahtar
     "vodafone_networks": [],            # [{"key","name","interface"}, ...]

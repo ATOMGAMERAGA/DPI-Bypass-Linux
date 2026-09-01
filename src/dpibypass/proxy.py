@@ -136,12 +136,30 @@ class TransparentProxy:
             except OSError:
                 pass
 
-            # İlk istemci verisini bekle (TLS ClientHello / HTTP isteği)
+            # Hedef adres ve port ``original_dst`` ile zaten biliniyor, bu
+            # yüzden yukarı akış bağlantısı istemcinin ilk baytlarını
+            # BEKLERKEN kurulur. Eskiden sıra "önce oku, sonra bağlan"dı ve
+            # bağlantı el sıkışmasının RTT'si her vekillenen bağlantıya
+            # doğrudan ekleniyordu; sunucunun önce konuştuğu protokollerde
+            # ise 4 saniyelik okuma beklemesi el sıkışmasının önüne
+            # geçiyordu. İki iş artık örtüşüyor.
+            #
+            # Not: bu kazanç TCP/TLS *açılış* süresindedir (80/443 yolu).
+            # Oyunların yerleşik UDP RTT'siyle ilgisi yoktur; o trafik
+            # zaten vekile taşınmaz.
+            connect_task = asyncio.ensure_future(
+                self._connect(loop, dst_ip, dst_port))
+
             first = b""
             try:
                 first = await asyncio.wait_for(loop.sock_recv(client, BUFSIZE), 4.0)
             except asyncio.TimeoutError:
                 first = b""
+            except BaseException:
+                # İstemci tarafı hata verdiyse yarı kurulmuş yukarı akış
+                # bağlantısını ortada bırakma.
+                await self._discard(connect_task)
+                raise
             if first == b"":
                 # Sunucunun önce konuştuğu protokol ya da kapanmış bağlantı
                 pass
@@ -151,7 +169,7 @@ class TransparentProxy:
             bypassed = bool(first) and strategy is not None and \
                 self.should_bypass(host, dst_ip)
 
-            upstream = await self._connect(loop, dst_ip, dst_port)
+            upstream = await connect_task
 
             if first:
                 if bypassed and strategy is not None:
@@ -188,17 +206,48 @@ class TransparentProxy:
                     except OSError:
                         pass
 
-    async def _connect(self, loop: asyncio.AbstractEventLoop,
-                       ip: str, port: int) -> socket.socket:
-        family = socket.AF_INET6 if ":" in ip else socket.AF_INET
-        sock = socket.socket(family, socket.SOCK_STREAM)
-        sock.setblocking(False)
-        mark_socket(sock)
+    @staticmethod
+    async def _discard(task: "asyncio.Future") -> None:
+        """Artık kullanılmayacak yukarı akış bağlantısını sızdırmadan kapat."""
+        task.cancel()
         try:
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock = await task
+        except (OSError, asyncio.CancelledError, asyncio.TimeoutError):
+            return
+        except Exception:
+            return
+        try:
+            sock.close()
         except OSError:
             pass
-        await asyncio.wait_for(loop.sock_connect(sock, (ip, port)), 10.0)
+
+    async def _connect(self, loop: asyncio.AbstractEventLoop,
+                       ip: str, port: int) -> socket.socket:
+        """Yukarı akış soketini kur; başarısız olursa soketi ARDINDA BIRAKMA.
+
+        Bu coroutine artık iptal edilebiliyor (istemci ilk baytları
+        gönderemeden düşerse ``_discard`` onu iptal eder). ``sock_connect``
+        sırasında gelen bir iptal, soketin sahipsiz kalmasına ve dosya
+        tanıtıcısının sızmasına yol açardı; bu yüzden başarı dışındaki her
+        çıkışta soket burada kapatılır. Soketin sahipliği yalnız başarıyla
+        döndüğünde çağırana geçer.
+        """
+        family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        try:
+            sock.setblocking(False)
+            mark_socket(sock)
+            try:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except OSError:
+                pass
+            await asyncio.wait_for(loop.sock_connect(sock, (ip, port)), 10.0)
+        except BaseException:
+            try:
+                sock.close()
+            except OSError:
+                pass
+            raise
         return sock
 
     @staticmethod

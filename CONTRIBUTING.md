@@ -23,6 +23,18 @@ GTK/libadwaita kurulu olmayan geliştirme makinelerinde GUI testleri proje içi
 stub'ları kullanır; testler gerçek masaüstü oturumu veya internet bağlantısı
 gerektirmemelidir.
 
+Ağ veri yolunu gerçekten çalıştıran entegrasyon testleri ayrıdır ve varsayılan
+olarak atlanır. Root yetkisi, `ip` ve `tc` gerektirir; ana makinenin fiziksel
+NIC'ine, default route'una veya firewall'una dokunmaz:
+
+```bash
+sudo DPIBYPASS_NETNS_TESTS=1 python3 -m unittest tests.test_netns_latency -v
+```
+
+Atlanan bir entegrasyon testi **geçmiş sayılmaz**. Bir performans iddiası için
+mock testlerin geçmesi tek başına yeterli değildir; simüle edilmiş bir ağda
+ölçülen kazanç da kullanıcının hattında ölçülmüş gibi sunulamaz.
+
 ## Test ilkeleri
 
 - Yeni hata düzeltmeleri mümkünse önce aynı hatayı yeniden üreten bir regresyon

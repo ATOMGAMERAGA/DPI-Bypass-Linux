@@ -47,7 +47,7 @@ sudo bash install.sh --uninstall
 | **DNS** | Sistemin tüm DNS trafiği (53/udp, 53/tcp) yerel köprüye yönlendirilir ve **DNS-over-HTTPS** ile taşınır. Birincil **Cloudflare**, yedekler **Google** ve **Quad9**. DNS zehirlenmesi ve DNS düzeyindeki engel böylece tamamen aşılır. |
 | **DPI** | Engelli hedeflere giden TCP 80/443 bağlantıları yerel şeffaf vekile düşer. İlk istemci verisi (TLS ClientHello / HTTP isteği) seçilen stratejiye göre yeniden şekillendirilerek gönderilir; sunucu veriyi eksiksiz alır, yol üstündeki DPI ise SNI'yi göremez. |
 | **QUIC** | İsteğe bağlı olarak engelli hedeflere UDP/443 reddedilir; tarayıcılar atlatma uygulanabilen TCP'ye döner. |
-| **Ping düşürme (Beta)** | Aktif fiziksel arayüzde donanıma uyarlanmış adayları (Wi-Fi güç tasarrufu, `fq_codel`/`fq`/`cake`, Ethernet EEE ve RX coalescing) tek tek uygulayıp ölçer, her denemeden sonra geri alır ve yalnız doğrulanmış kazancı olan adayı bırakır. Kazanç yoksa hiçbir ayar değişmez. |
+| **Ping düşürme (Beta)** | Seçtiğiniz hedefe giden yolu doğrular, her adayı kontrol ölçümüyle iç içe (A/B/A) sınar ve kararı blok bootstrap güven aralığına dayandırır. Kazananı bağımsız bloklarla yeniden doğrular; yalnız o kalır, gerisi geri alınır. Kazanç yoksa hiçbir ayar değişmez. İsteğe bağlı SQM kipi, gerçek `bandwidth` ile yük altındaki gecikmeyi düşürür. |
 | **Diğer trafik** | Yönlendirilmez. ICMP (ping), oyun/VoIP UDP trafiği, torrent, VPN — hiçbiri vekilden geçmez, ölçülebilir bir etki oluşmaz. |
 
 ### Atlatma yöntemleri
@@ -111,86 +111,240 @@ başarısız bağlantılar sayılır ve arama kendiliğinden tekrarlanır.
 
 Bu özellik bir VPN değildir; ISP rotasını, fiziksel mesafeyi veya uzak
 sunucunun yükünü değiştiremez ve her ağda daha düşük ping garanti etmez. Esas
-amacı bilgisayar kaynaklı yerel kuyruklanma ve jitter nedenlerini azaltmaktır.
+amacı bilgisayar kaynaklı yerel kuyruklanma ve jitter nedenlerini azaltmak,
+özellikle **yük altında oluşan ping sıçramalarını** düşürmektir.
 
-### Nasıl çalışır: aday tabanlı ölçüm
+### Nasıl çalışır: zaman bakımından eşleştirilmiş A/B ölçümü
 
-Tek bir ayarı uygulayıp "oldu" demek yerine motor her adayı ayrı ayrı ölçer:
+Tek bir ayarı uygulayıp "oldu" demek yeterli değildir; ağ ölçüm sırasında
+kendiliğinden de iyileşebilir. Bu yüzden her aday **kontrol ölçümüyle iç içe**
+sınanır:
 
 ```
-taban ölçüm
-  → aday A uygula → ölç → geri al
-  → aday B uygula → ölç → geri al
-  → aday C uygula → ölç → geri al
-  → istatistiksel olarak anlamlı kazancı olan en iyi adayı seç
-  → uygula → bağımsız son doğrulama → kazanç tekrarlamazsa geri al
+hedefleri çöz, yolu doğrula
+  → blok 1: A ölç · B uygula-ölç-geri al
+  → blok 2: B uygula-ölç-geri al · A ölç      (sıra dengelenir: ABBA)
+  → blok 3: …
+  → blok çiftlerinin farkları üzerinden blok bootstrap güven aralığı
+  → kazananı BAĞIMSIZ holdout bloklarıyla yeniden doğrula
+  → doğrulandıysa uygula, doğrulanmadıysa geri al
 ```
 
-Her ölçüm noktası ısınma turu + birden çok ölçüm turu içerir. Varsayılan ağ
-geçidi ile IP tabanlı kararlı uzak hedeflerden örnek alınır; median, minimum,
-p95 RTT, jitter, yayılım (p95 − min) ve paket kaybı ayrı hesaplanır. ICMP
-kullanılamazsa DNS çözümleme süresini karıştırmayan doğrudan TCP-connect
-ölçümüne geçilir.
+Kararın dayandığı üç kural:
+
+1. **Havuzlama yok.** Her hedefin örnekleri kendi içinde özetlenir. Toplu
+   gösterge hedef başına *eşit ağırlıklıdır*, yani bir hedefin çok, diğerinin
+   az yanıt vermesi sahte kazanç üretemez. Yavaş bir hedefin susması iyileşme
+   değil, kapsam kaybıdır ve reddedilir.
+2. **Eşleştirme.** Fark, her B ölçümünün komşu A ölçümleriyle karşılaştırılması
+   ile bulunur; ağın yavaş sürüklenmesi (drift) böylece adaya yazılamaz.
+3. **Gürültü tabanı.** Kontrol kolu kendi içinde de karşılaştırılır (A/A).
+   Hiçbir şey değiştirmeden görülen fark, hem "kazanç" hem "kötüleşme"
+   kararının alt sınırıdır. Bu sayede sabit bir 2 ms duvarı olmadan, gerçek
+   ve tekrarlanan **1 ms altı** kazançlar da değerlendirilebilir; buna karşılık
+   saf gürültü hiçbir zaman kazanan seçtirmez.
+
+Ağ ölçüm boyunca kararsızsa sonuç `no-gain` değil **`inconclusive`** olur.
+
+### Ölçüm hedefi ve koşullar
+
+Ölçüm hedefini siz seçersiniz. Hedef tanımlı değilse genel ağ göstergesi
+adresleri kullanılır ve sonuç **açıkça öyle etiketlenir** — bu bir oyun ping'i
+değildir.
+
+```bash
+dpi-bypass latency target add oyun.sunucum.net:7777 udp "Oyun sunucusu"
+dpi-bypass latency target add 203.0.113.10 icmp
+dpi-bypass latency target list
+dpi-bypass latency target remove 0
+```
+
+Her hedef için IP, adres ailesi, protokol, port, arayüz, ifindex ve kaynak
+adresi sabitlenir; biri değişirse ölçümler karşılaştırılamaz sayılır ve yeni
+taban alınır. **DNS çözümleme süresi RTT'ye dahil edilmez**, ayrı raporlanır.
+ICMP RTT, TCP connect, UDP yankı ve TLS el sıkışması ayrı metriklerdir ve
+birbirinin yerine geçmez; bir TCP bağlantı hatasına "paket kaybı" denmez.
+
+Hedefe giden gerçek rota `ip route get` ile doğrulanır. Trafik başka bir
+arayüzden (örneğin VPN'den) gidiyorsa hedef ölçüme alınmaz — trafiği tünelin
+dışına zorlamayız. `SO_MARK` konamazsa TCP/TLS örneği toplanmaz: işaretsiz bir
+soket kendi şeffaf vekilimize düşebilir ve o zaman ölçülen şey ağ RTT'si
+değildir.
+
+Ölçüm koşulları birbirine karıştırılmaz:
+
+| Koşul | Ne ölçer |
+|---|---|
+| `idle` | ısınmış, düşük trafikli RTT (varsayılan) |
+| `first-packet` | kontrollü sessizlik sonrası **ilk** paketler — Wi-Fi güç tasarrufu hipotezi için |
+| `natural-traffic` | kullanıcının kendi trafiği altında (gözlemsel) |
+| `load-up` / `load-down` / `load-both` | yalnız izinli kontrollü yük testinde |
+
+```bash
+dpi-bypass latency test --condition first-packet
+```
 
 ### Adaylar
 
-Aday kümesi donanıma ve bağlantı türüne göre üretilir:
-
 | Aday | Ne zaman | Ne yapar |
 |---|---|---|
-| Wi-Fi güç tasarrufu | kablosuz arayüzde `iw` varsa ve güç tasarrufu açıksa | `iw dev … set power_save off` — uyku/uyanma gecikmesini kaldırır |
-| `fq_codel` / `fq` / `cake` | kök qdisc **yalnız** eksiksiz geri yüklenebilir basit bir FIFO ise (`pfifo`, `bfifo`, `pfifo_fast`); `cake` ayrıca `sch_cake` modülü varsa | kök qdisc'i değiştirir |
-| EEE kapalı | Ethernet'te `ethtool --show-eee` "enabled" diyorsa | `ethtool --set-eee … eee off` — LPI uyanma gecikmesini kaldırır |
-| Düşük gecikmeli RX coalescing | Ethernet'te `ethtool -c` okunabiliyor ve adaptive-rx açık / rx-usecs > 0 ise | `ethtool -C … adaptive-rx off rx-usecs 0` |
+| Wi-Fi güç tasarrufu | kablosuz arayüzde `iw` varsa ve güç tasarrufu açıksa | `iw dev … set power_save off`; uygulanan değer **geri okunarak** doğrulanır |
+| `fq_codel` / `fq` / `cake` | kuyruk yapısının geri alma tarifi **kanıtlandıysa** | kök qdisc'i ya da `mq` yapraklarını değiştirir |
+| EEE kapalı | Ethernet'te `ethtool --show-eee` "enabled" diyorsa | `ethtool --set-eee … eee off`, readback ile doğrulanır |
+| RX coalescing | `ethtool -c` okunabiliyor **ve** değerler geri yazılabiliyorsa | tek bir agresif `0` yerine sürücünün desteklediği birkaç nokta denenir; kazananı ölçüm seçer |
+| SQM (opt-in) | `latency_sqm` açık ve hat kapasitesi girilmişse | gerçek `bandwidth` ile CAKE (ya da HTB+`fq_codel`), mümkünse IFB ingress |
 
-Tekil adaylardan birden fazlası kazanç sağlarsa birleşimi de ölçülür ve en
-iyisi seçilir. Sürücü ya da araç desteklemiyorsa aday sessizce atlanır — hata
-üretilmez. `cake`, `fq_codel`, `fq`, `mq`, `noqueue` ve tüm bilinmeyen/custom
-qdisc yapıları korunur; kullanıcının kurduğu bir qdisc asla ezilmez.
+Kuyruk yapısı artık `tc -j -d` ile **yapılandırılmış** okunur (desteklenmiyorsa
+dar bir metin yoluna düşülür). `mq` kökü silinmez; korunur ve yalnız tanınan
+yaprakları aday olur — çok kuyruklu NIC'lerde eskiden hiçbir aday
+denenemiyordu. Bir yapının aday olabilmesi için geri alma tarifi
+`tc qdisc change` ile **uygulanarak kanıtlanır** (mevcut değerlerin aynısı
+yazıldığı için no-op'tur) ve durum geri okunarak karşılaştırılır. Kanıtlanamayan,
+allowlist dışı bir seçeneği olan ya da bağlı filter/class taşıyan yapı korunur.
+Kullanıcının CAKE/HTB/SQM yapılandırması varsayılan olarak asla ezilmez.
 
-### Kabul ve geri alma eşikleri
+Çakışmayan adayların birleşimi de sınanır; birleşime tek başına eşiği geçmemiş
+ama kötüleşme de göstermemiş nötr adaylar katılabilir. Aynı kaynağı değiştiren
+çelişkili adaylar (iki qdisc, iki coalescing) birleştirilmez.
 
-Gürültü kazanç sayılmaz: 20.1 ms → 19.8 ms reddedilir, 25 → 20 ms /
-p95 55 → 31 ms / jitter 8 → 3 ms kabul edilir. Aşağıdakilerden biri olursa
-değişiklik geri alınır:
+### Yük altında düşük gecikme (SQM) — opt-in, Beta
 
-- bağlantı kesilirse ya da ölçüm yöntemi değişirse,
-- paket kaybı artarsa,
-- median, p95 ya da jitter kötüleşirse,
-- son doğrulamada kazanç tekrarlanmazsa,
+Eski sürüm `cake`'i **bandwidth vermeden** kuruyordu. CAKE'in varsayılanı
+`unlimited`'dır: shaper devre dışıdır, yalnız AQM çalışır. Darboğaz modemde
+ya da ISS'te olduğunda bu kuyruğu kontrol etmez.
+
+Gerçek kazanç için kuyruğun bizim tarafımıza çekilmesi, yani hattın gerçek
+kapasitesinin biraz altında şekillendirme yapılması gerekir. Bunun bedeli
+throughput'tur, bu yüzden ayrı ve varsayılan **kapalı** bir kiptir:
+
+```bash
+# Kapasiteyi hız testinizden ya da ISS sözleşmenizden girin.
+# Ethernet/Wi-Fi link hızı internet kapasiteniz DEĞİLDİR.
+dpi-bypass latency calibrate 20000 100000     # upload / download kbit/s
+dpi-bypass set latency_sqm=true
+```
+
+- Kapasite bilinmiyorsa shaping **yapılmaz**; keyfî bir 10/100 Mbit değeri
+  uydurulmaz.
+- Tek bir sabit yüzde dayatılmaz: %95, %90 ve %85 oranları aday olarak
+  karşılaştırılır, kazananı ölçüm seçer.
+- Bütün akışlara adil davranan `besteffort` kullanılır. ICMP'ye özel öncelik
+  verilmez, "tüm UDP oyundur" varsayılmaz.
+- CAKE'in `rtt` parametresi bilinçli olarak ayarlanmaz: o bir AQM hedefidir,
+  internet ping'ini o değere sabitlemez.
+- Ingress için yalnız **uygulamaya ait** bir IFB aygıtı (`ifb-dpib`), kendi
+  kök handle'ımız (`4470:`) ve kendi filter önceliğimiz (`prio 4470`)
+  oluşturulur. Arayüzde zaten bir ingress/clsact yapılandırması varsa ona
+  dokunulmaz ve durum açıkça **"yalnız upload şekillendirildi"** olarak
+  raporlanır.
+- Yük testi kapalıyken SQM adayları yalnız boşta ölçülür; bu durumda yük
+  altındaki kazanç ve throughput bedeli **ölçülememiştir** ve arayüz bunu
+  söyler.
+
+Dizüstü bilgisayardaki shaping yalnız bu makinenin trafiğini kontrol eder.
+Modem/ISS kuyrukları ve evdeki diğer cihazlar yönetilmez; çoğu durumda doğru
+yer **router tarafındaki SQM**'dir. Bu araç router'a bağlanmaz, ayarını
+değiştirmez.
+
+### Kontrollü yük testi — opt-in
+
+Gerçek bufferbloat ölçümü hattı doyurmayı gerektirir. Bu yalnız sizin açık
+onayınızla, **size ait ya da yük testine açıkça izinli** bir sunucuya karşı ve
+sert bir bütçe altında yapılır. Genel DNS çözücülerine, ölçüm referanslarına ve
+oyun sunucularına yük gönderilmez — reddedilir. Ölçümlü/mobil bağlantıda ayrı
+bir onay istenir. Yük hiç uygulanmadıysa sonuçta "bufferbloat ölçüldü" yazmaz.
+
+### Kabul, veto ve geri alma
+
+Kazanç kullanıcının hedefinde aranır. Aşağıdakilerden biri olursa aday
+reddedilir ya da uygulanmış değişiklik geri alınır:
+
+- ölçüm koşulu, yöntemi ya da hedef kimliği değişirse (karşılaştırılamaz),
+- ölçüm yolu doğrulanamazsa,
+- bir hedef yanıt vermeyi bırakırsa (kapsam kaybı),
+- kayıp/başarısızlık oranı artarsa,
+- median kazancının altında p95 ya da jitter kötüleşirse,
+- bağımsız holdout doğrulamasında kazanç tekrarlanmazsa,
 - aday yarım uygulanırsa (uygulanan adımların hepsi geri alınır),
 - ağ/arayüz değişirse,
-- tarama sırasında ayar dışarıdan değiştirilirse (o zaman tarama durur ve
-  araya giren ayar korunur).
+- tarama sırasında ayar dışarıdan değiştirilirse (tarama durur, araya giren
+  ayar korunur).
+
+Komutun `0` dönmesi "uygulandı" sayılmaz: her eylemden sonra değer **geri
+okunur** ve hedef duruma ulaşılmadıysa adım başarısızdır. Bu, NetworkManager
+veya güç yönetimi servisinin ayarı hemen geri değiştirdiği durumları yakalar.
+
+Geri alma tarifi her zaman **değişiklikten önce** diske yazılır
+(`/run/dpi-bypass/latency.json`), ters sırada uygulanır ve idempotenttir.
+Kayıt yalnız arayüz adını değil `ifindex`'i de taşır: `eth0` adı yeniden
+kullanıldığında eski kayıt farklı bir aygıta uygulanmaz. Kayıt **bozuksa**,
+"kayıt yok" ile aynı sayılmaz — dosya silinmez, yeni hiçbir değişiklik
+yapılmaz ve durum `snapshot-corrupt` olarak bildirilir.
+
+### Durum kodları
+
+`enabled` sizin tercihiniz, `active` şu anda yürürlükte ve doğrulanmış ayardır;
+ikisi karıştırılmaz. Durum kodları kararlıdır ve arayüz metninden bağımsızdır:
+
+`disabled` · `measuring` · `applying` · `benchmarking` · `verifying` ·
+`active` · `no-gain` · `inconclusive` · `unsupported` · `already-configured` ·
+`permission-denied` · `external-change` · `rolled-back` · `rollback-failed` ·
+`snapshot-corrupt` · `failed` · `cancelled`
+
+Her aday için ayrıca `tried` / `not-needed` / `unsupported` /
+`budget-exhausted` / `rejected` / `failed` / `cancelled` ve gerçek nedeni
+gösterilir. Kazanç yoksa bu bir teknik açıklamayla söylenir ("yalnız Wi-Fi
+adayı denendi; mevcut kuyruk korundu; yük testi yapılmadı") — "artık daha
+düşük ms mümkün değil" iddiasına dönüştürülmez.
 
 ### Ağ başına öğrenme
 
 Doğrulanan en iyi aday ağ parmak izi ile `/var/lib/dpi-bypass/latency-profiles.json`
-içinde saklanır. Aynı ağa dönüldüğünde önce o aday uygulanıp kısa bir
-doğrulama yapılır; artık kazanç sağlamıyorsa geri alınır, kayıt silinir ve tam
-tarama yeniden çalışır.
+içinde saklanır. Kayıt yalnız "hangi adayı önce dene" bilgisidir. Ölçüm koşulu,
+hedef kümesi, arayüz, çekirdek ya da şema değişirse kayıt geçersiz sayılır;
+eski bir kazanç bugünün ölçümü gibi gösterilmez. Aktif profil seyrek ve hafif
+biçimde denetlenir (cooldown + histerezis); sürekli doygunluk testi yapılmaz ve
+doğal dalgalanmada apply/rollback salınımı kurulmaz.
 
 ### Kapsam dışı
 
-DNS, MTU, rota, DHCP, IPv6, firewall, TCP buffer/kalıcı sysctl, BBR, ECN ve
-CPU governor ayarları bu kipin kapsamı dışındadır — hiçbiri bir oyunun UDP
-RTT'sini düşürmez, bir kısmı bağlantıyı bozar. Gerçek bufferbloat ölçümü hattı
-doyurmayı gerektirdiği için yapılmaz; ölçülmeyen bir değer ölçülmüş gibi de
-gösterilmez. Doğrulanmış kazanç yoksa arayüz bunu açıkça söyler ve tahmini
-milisaniye veya yüzde üretmez.
+DNS, MTU, rota, DHCP, IPv6, firewall, kalıcı sysctl, BBR, `tcp_low_latency`
+(etkisiz bir legacy anahtar), GRO/GSO/TSO, ring buffer, IRQ affinity, RPS/XPS
+ve CPU governor bu kipin kapsamı dışındadır. QUIC veya IPv6 bu kip adına
+kapatılmaz; oyun/UDP trafiği vekile taşınmaz (vekil yalnız TCP 80/443 taşır).
 
-Servis kapanırken, ağ değişirken ve `dpi-bypassd --cleanup` çalışırken aynı
-idempotent geri alma tarifi (`/run/dpi-bypass/latency.json`) kullanılır; servis
-çökerse yeniden başladığında bu tarif önce uygulanır.
+### Komutlar
 
 ```bash
-dpi-bypass latency status   # aday sonuçları, önce/sonra ölçüm ve kazanç
-dpi-bypass latency on       # aday taramasını başlat (birkaç dakika sürebilir)
-dpi-bypass latency off      # kipi kapat, tüm değişiklikleri geri al
-dpi-bypass latency test     # yalnız ölç, hiçbir şeyi değiştirme
+dpi-bypass latency status                     # aday sonuçları, önce/sonra, kazanç
+dpi-bypass latency status --json              # aynısı, makine okunur
+dpi-bypass latency on                         # A/B/A taramasını başlat
+dpi-bypass latency off                        # kipi kapat, değişiklikleri geri al
+dpi-bypass latency cancel                     # devam eden ölçümü durdur ve geri al
+dpi-bypass latency test                       # yalnız ölç, hiçbir şeyi değiştirme
+dpi-bypass latency test --condition first-packet
+dpi-bypass latency target list|add|remove|clear
+dpi-bypass latency calibrate 20000 100000     # hat kapasitesi (kbit/s)
+dpi-bypass latency report                     # yerel, gizlilik korumalı tanı raporu
 ```
 
----
+Tanı raporu yereldir: SSID, ağ geçidi MAC'i, dış IP ve hedef adlarınız rapora
+konmaz.
+
+### Kazancı kendiniz doğrulayın
+
+Aracın kararına güvenmeniz gerekmez; aynı hedefte kendiniz A/B yapın:
+
+```bash
+dpi-bypass latency target add <kendi-hedefiniz>   # aynı hedefi sabitleyin
+dpi-bypass latency off  && dpi-bypass latency test   # A: kapalı
+dpi-bypass latency on   && dpi-bypass latency test   # B: açık
+dpi-bypass latency off                                # her şeyi geri al
+```
+
+Tek bir ölçüme bakmayın; birkaç kez tekrarlayın ve **aynı** hedefe, **aynı**
+koşulda baktığınızdan emin olun. Farklı hedefleri karşılaştırmak ya da DNS
+süresini oyun RTT'si sanmak yanıltır.
 
 ## Vodafone sınırsız modu
 
@@ -275,7 +429,7 @@ dpi-bypass logs -f         # canlı günlük
 dpi-bypass set mode=all dns_provider=quad9
 dpi-bypass disable / enable
 dpi-bypass vodafone status  # hotspot TTL düzeltmesi (on / off)
-dpi-bypass latency status   # Ping düşürme (on / off / test)
+dpi-bypass latency status   # Ping düşürme (on/off/test/target/calibrate/report/cancel)
 dpi-bypass doctor           # soket erişimi tanısı (grup / oturum / soket)
 ```
 
@@ -343,6 +497,16 @@ gerekmez. `sg` yoksa bu açıkça söylenir.
 | `extra_domains` | `[]` | Elle eklenen alan adları |
 | `gui_autostart` | `true` | Oturum açılışında arayüzü başlat |
 | `latency_mode` | `false` | Ölçümlü düşük gecikme optimizasyonu |
+| `latency_targets` | `[]` | Kendi ölçüm hedefleriniz; boşsa genel ağ göstergesi kullanılır ve öyle etiketlenir |
+| `latency_sqm` | `false` | Yük altında düşük gecikme (gerçek shaping). Throughput'tan feragat eder |
+| `latency_uplink_kbit` | `0` | Hat upload kapasitesi (kbit/s). `0` = bilinmiyor, shaping yapılmaz |
+| `latency_downlink_kbit` | `0` | Hat download kapasitesi (kbit/s) |
+| `latency_max_throughput_loss` | `15.0` | SQM'de kabul edilen azami throughput kaybı (%) |
+| `latency_load_test` | `false` | Kontrollü yük testi. Yalnız size ait/izinli bir sunucuya |
+| `latency_load_target` | `{}` | Yük testi sunucusu (`host`, `port`, `mode`, `owned`) |
+| `latency_load_max_seconds` | `12` | Yük testi süre bütçesi (sert üst sınır 60) |
+| `latency_load_max_bytes` | `67108864` | Yük testi veri bütçesi (sert üst sınır 512 MB) |
+| `latency_metered` | `false` | Bağlantı ölçümlü/mobil; yük testi için ayrı onay ister |
 | `vodafone_mode` | `false` | Vodafone sınırsız modu (hotspot TTL düzeltmesi) |
 | `vodafone_networks` | `[]` | Modun etkin olacağı ağlar (en fazla 10) |
 | `vodafone_ttl` | `65` | Giden paketlere yazılacak TTL (ileri düzey) |
@@ -357,7 +521,7 @@ gerekmez. `sg` yoksa bu açıkça söylenir.
 - Linux, systemd
 - Python 3.8+
 - nftables (yoksa iptables)
-- iproute2/`tc`, `iw` ve `ethtool` (Ping düşürme adayları; yoksa güvenle atlanır)
+- iproute2/`tc` ve `ip`, `iw`, `ethtool` (Ping düşürme adayları ve rota doğrulama; yoksa güvenle atlanır)
 - `sg` (shadow-utils) — grup üyeliği yeni eklendiğinde oturum kapatmadan uygulanır
 - GTK 4 + libadwaita 1.2+ ve PyGObject (yalnızca arayüz için)
 - Servis root olarak çalışır (`CAP_NET_ADMIN`, `CAP_NET_RAW`)
@@ -389,7 +553,16 @@ src/dpibypass/
   dnsserver.py   yerel DNS köprüsü
   proxy.py       şeffaf TCP vekil
   firewall.py    nftables / iptables kuralları
-  latency.py     aday tabanlı ölçüm, güvenli runtime optimizasyonu, geri alma
+  latency/       ölçümlü düşük gecikme motoru
+    metrics.py   endpoint bazında örnek ve özet (havuzlama yok)
+    probe.py     hedef çözümleme, yol doğrulama, protokol başına örnekleme
+    analysis.py  eşleştirilmiş A/B karşılaştırması ve blok bootstrap
+    qdisc.py     yapılandırılmış kuyruk keşfi ve kanıtlanmış geri alma
+    sqm.py       gerçek bandwidth shaping + IFB ingress (opt-in)
+    load.py      izinli, bütçeli kontrollü yük üretimi (opt-in)
+    actions.py   uygula → geri oku → kanıtla → geri al
+    profiles.py  ağ başına öğrenilen aday ve geçerlilik denetimi
+    engine.py    akışın düzenleyicisi
   session_access.py  grup / oturum / soket erişim tanısı ve 'sg' onarımı
   vodafone.py    hotspot TTL düzeltmesi (ayrı tabloda, eşik korumalı)
   netmon.py      netlink ağ değişikliği izleyicisi
