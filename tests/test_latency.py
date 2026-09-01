@@ -1451,14 +1451,85 @@ class TestProxyHandshakeLatency(unittest.IsolatedAsyncioTestCase):
         self.assertLess(order.index("connect-start"), order.index("read-done"))
         self.assertLess(order.index("connect-done"), order.index("read-done"))
 
-    async def test_a_failed_client_read_does_not_leak_the_upstream_socket(self):
+    async def test_connect_closes_its_socket_when_cancelled(self):
+        """İptal edilen bir bağlantı denemesi dosya tanıtıcısı sızdırmamalı.
+
+        ``_connect`` artık iptal edilebiliyor (istemci ilk baytları
+        gönderemeden düşerse). ``sock_connect`` sırasında gelen iptal,
+        soketin sahipsiz kalmasına yol açardı.
+        """
+        import asyncio as aio
+        from dpibypass import proxy as proxy_mod
+
+        sock = mock.MagicMock()
+        started = aio.Event()
+
+        async def never_connects(_sock, _address):
+            started.set()
+            await aio.sleep(3600)
+
+        loop = mock.MagicMock()
+        loop.sock_connect = never_connects
+
+        with mock.patch.object(proxy_mod.socket, "socket", return_value=sock):
+            task = aio.ensure_future(
+                self.proxy()._connect(loop, "198.51.100.5", 443))
+            await started.wait()
+            task.cancel()
+            with self.assertRaises(aio.CancelledError):
+                await task
+        sock.close.assert_called()
+
+    async def test_connect_closes_its_socket_when_the_connect_fails(self):
+        import asyncio as aio
+        from dpibypass import proxy as proxy_mod
+
+        sock = mock.MagicMock()
+
+        async def refused(_sock, _address):
+            raise ConnectionRefusedError("reddedildi")
+
+        loop = mock.MagicMock()
+        loop.sock_connect = refused
+
+        with mock.patch.object(proxy_mod.socket, "socket", return_value=sock):
+            with self.assertRaises(ConnectionRefusedError):
+                await self.proxy()._connect(loop, "198.51.100.5", 443)
+        sock.close.assert_called()
+
+    async def test_discard_closes_an_already_established_upstream(self):
+        """Bağlantı kurulduktan sonra istemci düşerse soket açık kalmamalı."""
         import asyncio as aio
         from dpibypass import proxy as proxy_mod
 
         upstream = mock.MagicMock()
 
+        async def connected():
+            return upstream
+
+        task = aio.ensure_future(connected())
+        await aio.sleep(0)                      # görev tamamlansın
+        await proxy_mod.TransparentProxy._discard(task)
+        upstream.close.assert_called()
+
+    async def test_a_failed_client_read_never_leaves_an_upstream_behind(self):
+        """İstemci okuması hata verirse yukarı akış soketi geride kalmamalı.
+
+        Yukarı akışın kurulmayı tamamlayıp tamamlamadığı Python sürümüne
+        göre değişir (3.12'de ``wait_for`` yeniden yazıldı ve zamanlama
+        sırası farklı). İki durum da kabul edilebilir; kabul edilemez olan
+        **kurulmuş ama kapatılmamış** bir sokettir. Test bu yüzden
+        zamanlamaya değil sonuca bakar.
+        """
+        import asyncio as aio
+        from dpibypass import proxy as proxy_mod
+
+        upstream = mock.MagicMock()
+        state = {"established": False}
+
         async def connect(self, loop, ip, port):
             await aio.sleep(0)
+            state["established"] = True     # sahiplik çağırana geçti
             return upstream
 
         async def failing_read(sock, size):
@@ -1472,7 +1543,13 @@ class TestProxyHandshakeLatency(unittest.IsolatedAsyncioTestCase):
                 mock.patch.object(proxy_mod, "original_dst",
                                   return_value=("198.51.100.5", 443)):
             await instance._handle(loop, mock.MagicMock())
-        upstream.close.assert_called()
+
+        if state["established"]:
+            upstream.close.assert_called()
+        else:
+            # Hiç kurulmadıysa sokete dokunulmamış olmalı; iptal edilen
+            # _connect kendi soketini zaten kendisi kapatır.
+            self.assertEqual(upstream.method_calls, [])
 
     def test_udp_and_quic_are_not_pulled_into_the_proxy(self):
         """Latency kipi adına oyun/UDP trafiği vekile taşınmaz."""

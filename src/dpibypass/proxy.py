@@ -223,15 +223,31 @@ class TransparentProxy:
 
     async def _connect(self, loop: asyncio.AbstractEventLoop,
                        ip: str, port: int) -> socket.socket:
+        """Yukarı akış soketini kur; başarısız olursa soketi ARDINDA BIRAKMA.
+
+        Bu coroutine artık iptal edilebiliyor (istemci ilk baytları
+        gönderemeden düşerse ``_discard`` onu iptal eder). ``sock_connect``
+        sırasında gelen bir iptal, soketin sahipsiz kalmasına ve dosya
+        tanıtıcısının sızmasına yol açardı; bu yüzden başarı dışındaki her
+        çıkışta soket burada kapatılır. Soketin sahipliği yalnız başarıyla
+        döndüğünde çağırana geçer.
+        """
         family = socket.AF_INET6 if ":" in ip else socket.AF_INET
         sock = socket.socket(family, socket.SOCK_STREAM)
-        sock.setblocking(False)
-        mark_socket(sock)
         try:
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        except OSError:
-            pass
-        await asyncio.wait_for(loop.sock_connect(sock, (ip, port)), 10.0)
+            sock.setblocking(False)
+            mark_socket(sock)
+            try:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except OSError:
+                pass
+            await asyncio.wait_for(loop.sock_connect(sock, (ip, port)), 10.0)
+        except BaseException:
+            try:
+                sock.close()
+            except OSError:
+                pass
+            raise
         return sock
 
     @staticmethod
