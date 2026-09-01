@@ -63,8 +63,9 @@ def make_window() -> window_module.MainWindow:
     win.status_subtitle = gtkstub.StubWidget()
     win.row_latency = gtkstub.StubWidget()
     win.row_latency_info = FakeRow()
-    win.latency_detail_rows = {key: FakeRow() for key in (
-        "before", "after", "gain", "applied", "candidates", "skipped")}
+    win.latency_detail_rows = {key: FakeRow()
+                               for key, _title in
+                               window_module.LATENCY_DETAIL_ROWS}
     win._loading = False
     win.status = {}
     win.toasts = gtkstub.StubWidget()

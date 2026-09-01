@@ -16,6 +16,20 @@ from .client import DaemonClient
 from .widgets import (Banner, HAS_ABOUT_DIALOG, button_row, combo_row, idle,
                       message, spin_row, switch_row, toolbar_view)
 
+#: Gecikme paneli satırları. Tek kaynak: testler de bu listeyi kullanır,
+#: böylece üretim arayüzü ile test kopyası birbirinden ayrışamaz.
+LATENCY_DETAIL_ROWS = (
+    ("targets", "Ölçüm hedefi"),
+    ("condition", "Koşul ve yöntem"),
+    ("before", "Önce"),
+    ("after", "Sonra"),
+    ("gain", "Kazanç"),
+    ("applied", "Uygulanan"),
+    ("verification", "Doğrulama"),
+    ("candidates", "Denenen adaylar"),
+    ("skipped", "Atlananlar"),
+)
+
 MODE_LABELS = [
     ("smart", "Akıllı — yalnızca engelli siteler"),
     ("all", "Tüm siteler — her şey vekilden geçer"),
@@ -278,8 +292,9 @@ class MainWindow(Adw.ApplicationWindow):
         advanced = Adw.PreferencesGroup(title="Gelişmiş")
         self.row_latency, _ = switch_row(
             "Ping düşürme",
-            "Aktif ağdaki güvenli düşük-gecikme adaylarını tek tek ölçer, "
-            "yalnızca doğrulanmış kazancı olanı bırakır, gerisini geri alır.",
+            "Her adayı kontrol ölçümüyle iç içe (A/B/A) sınar, kazancı "
+            "bağımsız bloklarla doğrular ve yalnızca doğrulananı bırakır; "
+            "gerisini geri alır.",
             False, lambda v: self._set_config(latency_mode=v), badge="BETA")
         advanced.add(self.row_latency)
 
@@ -292,10 +307,13 @@ class MainWindow(Adw.ApplicationWindow):
         # hiçbir kazanç burada gösterilmez.
         self.latency_detail_rows: dict[str, Adw.ActionRow] = {}
         for key, title in (
+            ("targets", "Ölçüm hedefi"),
+            ("condition", "Koşul ve yöntem"),
             ("before", "Önce"),
             ("after", "Sonra"),
             ("gain", "Kazanç"),
             ("applied", "Uygulanan"),
+            ("verification", "Doğrulama"),
             ("candidates", "Denenen adaylar"),
             ("skipped", "Atlananlar"),
         ):
@@ -631,15 +649,45 @@ class MainWindow(Adw.ApplicationWindow):
         elif state in ("measuring", "applying", "benchmarking", "verifying"):
             summary = latency.get("message") or "ölçülüyor…"
         elif state == "no-gain":
-            summary = "Bu ağda doğrulanmış bir gecikme iyileştirmesi bulunamadı."
+            summary = (latency.get("message")
+                       or "Denenen adaylar ölçülebilir bir kazanç sağlamadı.")
+        elif state == "inconclusive":
+            summary = (latency.get("message")
+                       or "Ağ kararsızdı; kazanç belirlenemedi.")
+        elif state == "snapshot-corrupt":
+            summary = (latency.get("message")
+                       or "Geri alma kaydı okunamadı; yeni ayar denenmiyor.")
         else:
             summary = latency.get("message") or "—"
         self.row_latency_info.set_subtitle(summary)
 
-        before = (latency.get("before") or {}).get("remote") or {}
-        after = (latency.get("after") or {}).get("remote") or {}
+        before_m = latency.get("before") or {}
+        after_m = latency.get("after") or {}
+        before = before_m.get("remote") or {}
+        after = after_m.get("remote") or {}
         gain = latency.get("gain") or {}
         rows = self.latency_detail_rows
+
+        # Özellik kapalıyken hiçbir ayrıntı satırı gösterilmez: kapalı bir
+        # kipin yanında ölçüm bağlamı yazmak yanıltıcıdır.
+        enabled = bool(latency.get("enabled"))
+        settings = latency.get("settings") or {}
+        targets = settings.get("targets") or []
+        if not enabled:
+            target_text = ""
+        elif targets:
+            target_text = ", ".join(
+                (f"{item['host']}:{item['port']}" if item.get("port")
+                 else str(item.get("host", "?")))
+                + f"/{item.get('protocol', 'icmp')}" for item in targets)
+        else:
+            # Kullanıcı hedefi yoksa bunu açıkça söyle: genel ağ göstergesi
+            # bir oyun ping'i değildir.
+            target_text = ("tanımlı değil — genel ağ göstergesi "
+                           "(oyun ping'i değildir)")
+        self._set_detail(rows["targets"], target_text)
+        self._set_detail(rows["condition"],
+                         self._fmt_condition(before_m) if enabled else "")
         self._set_detail(rows["before"], self._fmt_remote(before))
         # "Sonra" ve "Kazanç" yalnızca doğrulanmış ve yürürlükteki bir sonuç
         # varken anlamlıdır; geri alınmış bir denemenin ölçümü kazanç değildir.
@@ -648,6 +696,9 @@ class MainWindow(Adw.ApplicationWindow):
         self._set_detail(
             rows["applied"],
             ", ".join(latency.get("applied") or []) if active else "")
+        self._set_detail(rows["verification"],
+                         self._fmt_verification(latency.get("verification") or {})
+                         if active else "")
         self._set_detail(rows["candidates"],
                          self._fmt_candidates(latency.get("candidates") or []))
         self._set_detail(rows["skipped"], "; ".join(latency.get("skipped") or []))
@@ -659,6 +710,30 @@ class MainWindow(Adw.ApplicationWindow):
             row.set_subtitle(text)
 
     @staticmethod
+    def _fmt_condition(measurement: dict) -> str:
+        if not measurement:
+            return ""
+        parts = [f"koşul {measurement.get('condition', 'idle')}",
+                 f"yöntem {measurement.get('method', '-')}"]
+        endpoints = measurement.get("endpoints") or []
+        samples = sum(int(item.get("received", 0)) for item in endpoints)
+        if samples:
+            parts.append(f"{samples} örnek / {len(endpoints)} hedef")
+        if not measurement.get("path_verified", True):
+            parts.append("ölçüm yolu doğrulanamadı")
+        return " · ".join(parts)
+
+    @staticmethod
+    def _fmt_verification(verification: dict) -> str:
+        if not verification:
+            return ""
+        holdout = verification.get("holdout") or {}
+        parts = [f"bağımsız holdout · {verification.get('blocks', '?')} blok çifti"]
+        if holdout.get("reason"):
+            parts.append(str(holdout["reason"]))
+        return " · ".join(parts)
+
+    @staticmethod
     def _fmt_remote(stats: dict) -> str:
         if not stats or stats.get("median_ms") is None:
             return ""
@@ -667,7 +742,12 @@ class MainWindow(Adw.ApplicationWindow):
             parts.append(f"{stats['p95_ms']:g} ms p95")
         if stats.get("jitter_ms") is not None:
             parts.append(f"{stats['jitter_ms']:g} ms jitter")
-        parts.append(f"%{stats.get('packet_loss', 0):g} kayıp")
+        parts.append(f"%{stats.get('packet_loss', 0):g} yanıtsız")
+        total = stats.get("endpoints_total")
+        if total:
+            parts.append(f"kapsam {stats.get('endpoints_responding', 0)}/{total}")
+        if stats.get("p95_reliable") is False:
+            parts.append("p95 için örnek az")
         return " · ".join(parts)
 
     @staticmethod
@@ -684,10 +764,18 @@ class MainWindow(Adw.ApplicationWindow):
 
     @staticmethod
     def _fmt_candidates(candidates: list) -> str:
+        """Her aday için gerçek sonucu göster: denendi / desteklenmiyor / …"""
+        labels = {"tried": "denendi", "not-needed": "değişiklik gerekmiyordu",
+                  "unsupported": "desteklenmiyor", "budget-exhausted": "bütçe doldu",
+                  "rejected": "reddedildi", "failed": "başarısız",
+                  "cancelled": "iptal"}
         parts = []
         for item in candidates:
             mark = "✓" if item.get("verified") else "✕"
-            parts.append(f"{mark} {item.get('label', item.get('key', '?'))}")
+            status = labels.get(item.get("status", ""), item.get("status", ""))
+            name = item.get("label", item.get("key", "?"))
+            parts.append(f"{mark} {name} ({status})" if status
+                         else f"{mark} {name}")
         return " · ".join(parts)
 
     def _set_config(self, **values) -> None:
