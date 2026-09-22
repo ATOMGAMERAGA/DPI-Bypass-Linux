@@ -21,6 +21,11 @@ SOCKET_GROUP = "dpi-bypass"
 SOCKET_MODE = 0o660
 SOCKET_MODE_DEGRADED = 0o600
 
+# IPC satırları yeni satırla sonlandırılmış JSON çerçeveleridir. Hem sunucu
+# hem istemci aynı üst sınırı uygular; böylece bozuk bir yerel eş uç sınırsız
+# bellek büyümesine veya asyncio StreamReader limit hatasına yol açamaz.
+IPC_MAX_MESSAGE_BYTES = 256 * 1024
+
 # --- Vodafone sınırsız kipi -------------------------------------------------
 # Vodafone modunda TTL yeniden yazımı yalnızca bu değerin ÜSTÜNDEKİ paketlere
 # uygulanır. strategies.py'deki disorder/fake stratejileri kasıtlı olarak
